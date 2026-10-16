@@ -3,7 +3,7 @@
 
   Run in an ADMINISTRATOR PowerShell, from the repository folder:
 
-      powershell -ExecutionPolicy Bypass -File install\install.ps1 -Python "C:\Program Files\Python312\python.exe"
+      powershell -ExecutionPolicy Bypass -File install\install.ps1 -Python "C:\Program Files\Python313\python.exe"
 
   What it does (and nothing else):
     1. checks that the Python you name sits in a folder normal users cannot write to (the service runs as SYSTEM,
@@ -14,12 +14,13 @@
     4. writes gate.cmd (what sshd will run) and thessley-pam-win.cmd (the admin tool);
     5. creates a scheduled task that starts the service as SYSTEM at boot, and starts it.
 
-  It does NOT change sshd_config, the firewall (unless you pass -OpenFirewall), accounts or groups. Those are left
+  It does NOT change sshd_config, the firewall (unless you pass -OpenFirewall; -FirewallProfile Any includes "Public" networks), accounts or groups. Those are left
   to you; the last lines print what to do.
 #>
 param(
     [Parameter(Mandatory = $true)][string]$Python,
-    [switch]$OpenFirewall
+    [switch]$OpenFirewall,
+    [ValidateSet('Private', 'Any')][string]$FirewallProfile = 'Private'   # 'Any' also covers networks Windows calls Public
 )
 $ErrorActionPreference = 'Stop'
 
@@ -35,7 +36,7 @@ $task = 'ThessleyPamWin'
 # --- 1. the Python must be out of reach of normal users --------------------------------------------------------------
 $Python = (Resolve-Path $Python).Path
 if (-not $Python.StartsWith($env:ProgramFiles, [StringComparison]::OrdinalIgnoreCase) -and -not $Python.StartsWith(${env:ProgramFiles(x86)}, [StringComparison]::OrdinalIgnoreCase)) {
-    throw "Python must be installed for all users, under Program Files (it is $Python). Install one with:  winget install Python.Python.3.12 --scope machine"
+    throw "Python must be installed for all users, under Program Files (it is $Python). Install one with:  winget install --id Python.Python.3.13 --scope machine"
 }
 $riskyRights = [Security.AccessControl.FileSystemRights]::WriteData -bor [Security.AccessControl.FileSystemRights]::AppendData -bor [Security.AccessControl.FileSystemRights]::Write
 foreach ($p in @((Split-Path $Python), (Split-Path (Split-Path $Python)))) {
@@ -96,8 +97,8 @@ Start-Sleep -Seconds 3
 if ($OpenFirewall) {
     Remove-NetFirewallRule -DisplayName 'Thessley Passkey approvals' -ErrorAction SilentlyContinue
     New-NetFirewallRule -DisplayName 'Thessley Passkey approvals' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 47810-47819 `
-        -Program $Python -Profile Private -RemoteAddress LocalSubnet | Out-Null
-    Write-Host 'Firewall: allowed TCP 47810-47819 from the local subnet, on Private networks only.'
+        -Program $Python -Profile $FirewallProfile -RemoteAddress LocalSubnet | Out-Null
+    Write-Host "Firewall: allowed TCP 47810-47819 from the local subnet ($FirewallProfile networks)."
 }
 
 $cli = Join-Path $base 'thessley-pam-win.cmd'

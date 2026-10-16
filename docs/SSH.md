@@ -52,11 +52,14 @@ the window short; `thessley-pam-win end-pass` ends passes at once. Turned off by
 
 1. **Python for all users** (the service runs as SYSTEM and must not load code a normal user can change):
 
-       winget install Python.Python.3.12 --scope machine
+       winget install --id Python.Python.3.13 --scope machine
+
+   Pick a version you do **not** already have installed just for your own user: Windows Installer treats the all-users and
+   per-user builds of the same Python version as one product, so installing the same version both ways fails (error 1603).
 
 2. In an **administrator** PowerShell, from this folder:
 
-       powershell -ExecutionPolicy Bypass -File install\install.ps1 -Python "C:\Program Files\Python312\python.exe" -OpenFirewall
+       powershell -ExecutionPolicy Bypass -File install\install.ps1 -Python "C:\Program Files\Python313\python.exe" -OpenFirewall
 
    It refuses a Python that normal users can write to, installs `cryptography` and `qrcode` into it, copies the program to
    `C:\ProgramData\ThessleyPamWin`, closes the data folders to normal users, creates the scheduled task that runs the
@@ -158,6 +161,30 @@ timeouts, passes (same address only, fixed length, ended by removing or disablin
 end to end on localhost with a stand-in phone that signs like the real apps, and that the gate refuses on anything but a
 clear yes.
 
-**Not tested here:** running as SYSTEM from the scheduled task, the installer's permission changes, a real `sshd` handing
-a session to `gate.cmd` (password step, pseudo-terminal, `SSH_ORIGINAL_COMMAND`, `sftp`/`scp`), and the real phone and
-desktop apps against this server. Do that first on an account you can recover, with a second session open.
+**Supervised test on Windows 11 (2026-10-16), and what it showed:**
+
+- The installer ran as administrator; the scheduled task started the service, which listens on `127.0.0.1:47800` only.
+- The folder lockdown holds for a normal user: `users\` and `service.log` are unreadable, nothing in the program folder or
+  `gate.cmd` can be changed, and the admin tool is closed to them.
+- The running service refuses an account that is not enrolled, and rejects garbage, a bad address and a path-trick user name.
+- After `sshd` was restarted with the `Match User` block, a password login for that account from another computer on the
+  LAN was accepted, and the account's owner reported the QR code, link and approval working. The approval itself is
+  recorded in `service.log`; that line was not inspected by the author.
+
+**Still not tested:** the service's run-as-SYSTEM status was inferred, not read; `sftp`/`scp` and `ssh host command`
+through the gate; two approvers at once; passes with a real `sshd`; and the real phone app against this server.
+Do those first on an account you can recover, with a second session open.
+
+## Things that went wrong on the first install (and the fix)
+
+- **`winget install --scope machine` fails with 1603** when the *same Python version* is already installed just for your
+  user: Windows Installer treats the two as one product. Install a different version for all users (3.13 above).
+- **`sshd` reads `sshd_config` only when it starts.** A login right after editing the file runs on the old rules, so there
+  is no gate and no QR code. Restart the service (administrator), after `sshd.exe -t` prints nothing.
+- **"Cannot open service sshd"** means the PowerShell window is not elevated.
+- **`Restart-Service` cannot find the service** if it was removed; register it again with `New-Service` (see the
+  OpenSSH package's own service settings) and run `sc.exe sidtype sshd unrestricted`.
+- **Notepad does not show `sshd_config`**: `C:\ProgramData` is hidden and the file has no extension. Use
+  `notepad C:\ProgramData\ssh\sshd_config` from an administrator PowerShell.
+- Windows classes many home Wi-Fi networks as **Public**; the approval firewall rule is Private-only unless you install with
+  `-OpenFirewall -FirewallProfile Any` (still limited to the local subnet).
