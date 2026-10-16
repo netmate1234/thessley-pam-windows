@@ -34,7 +34,7 @@ def _listening(ip: str, routes: dict, port: int = PORT):
         try:
             candidate.__enter__()
         except OSError as e:
-            if e.errno != errno.EADDRINUSE and getattr(e, "winerror", 0) != 10048:
+            if e.errno != errno.EADDRINUSE and getattr(e, "winerror", 0) not in (10048, 10013):  # in use / exclusive-use clash
                 raise
             continue
         lst = candidate
@@ -48,8 +48,12 @@ def _listening(ip: str, routes: dict, port: int = PORT):
 
 
 def run(username: str, rhost: str, tty: str, say: Callable[[str], None], log: Callable[[str, bool], None] | None = None,
-        *, ip: str | None = None, port: int = PORT, wait: float = WAIT, cancel: threading.Event | None = None) -> bool:
-    """Ask for an approval for `username` logging in from `rhost`. `say(line)` shows a line to the person."""
+        *, ip: str | None = None, port: int = PORT, wait: float = WAIT, cancel: threading.Event | None = None,
+        use_pass: bool = True, grant_pass: bool = True) -> bool:
+    """Ask for an approval for `username` logging in from `rhost`. `say(line)` shows a line to the person.
+
+    `use_pass=False` ignores an existing pass and `grant_pass=False` records none: used when the approval is for adding
+    an approver, which must never ride on a pass."""
     log = log or (lambda msg, warn=False: None)
     try:
         username = store.normalize_user(username)
@@ -65,7 +69,7 @@ def run(username: str, rhost: str, tty: str, say: Callable[[str], None], log: Ca
 
     rhost = rhost or grants.LOCAL
     grace = grants.grace_hours()
-    if grace > 0:
+    if grace > 0 and use_pass:
         try:
             held = grants.valid(username, rhost, {d["credential_id"] for d in devices})
         except OSError:
@@ -114,13 +118,14 @@ def run(username: str, rhost: str, tty: str, say: Callable[[str], None], log: Ca
         with _listening(ip, {path: respond}, port) as lst:
             link = f"thessleypam://{REQUEST_TYPE}?" + urlencode({
                 "h": ip, "p": lst.port, "fp": lst.fingerprint, "id": request_id, "n": nonce,
-                "m": mid, "hn": host, "u": username, "tty": "ssh",
+                "m": mid, "hn": host, "u": username, "tty": tty,
             })
-            say(f"Approve the ssh login for {username} on {host} with Thessley Passkey (within {int(wait)} s):")
+            what = "adding a device for" if tty == "add-device" else "the ssh login for"
+            say(f"Approve {what} {username} on {host} with Thessley Passkey (within {int(wait)} s):")
             say(f"Link: {link}")  # above the QR code, so it stays in view when the code scrolls the screen
             for line in qr.lines(link):
                 say(line)
-            if grace > 0:
+            if grace > 0 and grant_pass:
                 say(f"After you approve, your next login from {rhost} needs no approval for {grace:g} h.")
             say("Waiting for the approval...")
             deadline = time.monotonic() + wait
@@ -151,7 +156,7 @@ def run(username: str, rhost: str, tty: str, say: Callable[[str], None], log: Ca
         store.touch(username, outcome["cred"])
     except OSError:
         pass  # last_used is informational; never fail a valid approval over it
-    if grace > 0:
+    if grace > 0 and grant_pass:
         try:
             grants.add(username, rhost, grace, outcome["cred"])
             say(f"Thessley Passkey: approved. Your next login from {rhost} needs no approval for {grace:g} h.")

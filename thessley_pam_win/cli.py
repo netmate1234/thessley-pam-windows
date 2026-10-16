@@ -1,12 +1,16 @@
-"""thessley-pam-win: manage who may approve ssh logins to this Windows computer. Run it in an administrator terminal.
+"""thessley-pam-win: manage who may approve ssh logins to this Windows computer.
 
-    thessley-pam-win enroll --user NAME [--link]     add a phone or the desktop app as an approver (QR code, then a code check)
+Anyone may run `enroll` for their OWN account (the approval service checks who is asking and applies the rules in daemon.py).
+Everything else needs an administrator terminal.
+
+    thessley-pam-win enroll [--user NAME] [--link]   add a phone or the desktop app as an approver (QR code, then a code check)
     thessley-pam-win list [--user NAME]              show approvers
     thessley-pam-win remove --user NAME ID           forget an approver (its passes end with it)
     thessley-pam-win disable|enable --user NAME ID   switch an approver off or on without forgetting it
     thessley-pam-win grace [--hours H]               show or set how long one approval counts (0 = every login asks)
     thessley-pam-win passes                          who holds a pass right now
     thessley-pam-win end-pass [--user NAME]          end passes at once
+    thessley-pam-win self-enroll [on|off]            may an account with no approver enrol its first one itself
     thessley-pam-win status                          is the approval service running, and what is set
     thessley-pam-win sshd-config --user NAME         the lines to add to sshd_config for that user
 """
@@ -14,29 +18,23 @@
 import argparse
 import ctypes
 import datetime
+import json
+import os
 import queue
-import secrets
 import socket
 import sys
 import threading
-from urllib.parse import urlencode
 
-from . import approve, grants, machine, protocol, qr, store
+from . import approve, enroll, grants, store
 from .daemon import HOST, PORT
-from .listener import Listener  # noqa: F401  (approve._listening wraps it)
+from .gate import current_user
 
-ENROLL_WAIT = 180   # seconds the QR code stays valid
-CONFIRM_WAIT = 90   # seconds to type "yes" once the codes are shown
+CONFIRM_WAIT = enroll.CONFIRM_WAIT
 GATE = r"C:\ProgramData\ThessleyPamWin\gate.cmd"
-LABEL = __import__("re").compile(r"^[\w .,'()+-]{1,64}$")
 
 
 def _need_admin() -> None:
-    try:
-        is_admin = bool(ctypes.windll.shell32.IsUserAnAdmin())
-    except (AttributeError, OSError):
-        is_admin = False
-    if not is_admin:
+    if not _is_admin():
         sys.exit("Run this in an administrator terminal: it changes who may log in to this computer.")
 
 
@@ -47,11 +45,6 @@ def _user(arg: str | None) -> str:
         return store.normalize_user(arg)
     except ValueError as e:
         sys.exit(str(e))
-
-
-def _show_qr(link: str) -> None:
-    for line in qr.lines(link, border=2):
-        print(line)
 
 
 def _ask_yes(prompt: str, timeout: int) -> bool:
@@ -71,77 +64,64 @@ def _ask_yes(prompt: str, timeout: int) -> bool:
         return False
 
 
-def cmd_enroll(args) -> int:
-    _need_admin()
-    username = _user(args.user)
-    mid, host, ip = machine.machine_id(), machine.hostname(), machine.lan_ip()
-    request_id = secrets.token_urlsafe(12)
-    nonce = secrets.token_urlsafe(16)
+def _is_admin() -> bool:
+    try:
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except (AttributeError, OSError):
+        return False
 
-    pending: queue.Queue = queue.Queue(maxsize=1)  # the one verified approver waiting for the person's yes/no
-    decided = threading.Event()
-    decision: dict = {}
-    taken = threading.Lock()
 
-    def respond(client_ip: str, body: dict) -> tuple[int, dict]:
-        try:
-            public_key = str(body["public_key"])
-            signature = str(body["proof_signature"])
-            timestamp = int(body["timestamp"])
-            label = str(body.get("label") or "Phone").strip()
-            chain = [str(c) for c in body.get("attestation_chain") or []][:10]
-        except (KeyError, TypeError, ValueError):
-            return 400, {"result": "error", "message": "Missing fields."}
-        if not LABEL.match(label):
-            label = "Phone"
-        if not protocol.timestamp_ok(timestamp):
-            return 400, {"result": "error", "message": "Phone clock is off by more than a minute."}
-        msg = protocol.canonical("enroll", request_id, mid, username, nonce, timestamp, "register")
-        if not protocol.verify(public_key, signature, msg):
-            return 400, {"result": "error", "message": "Signature did not verify."}
-        if not taken.acquire(blocking=False):
-            return 409, {"result": "error", "message": "This code has already been used."}
-        pending.put({"client_ip": client_ip, "public_key": public_key, "label": label, "chain": chain})
-        if not decided.wait(CONFIRM_WAIT + 10) or not decision.get("ok"):
-            return 200, {"result": "denied", "message": "Not confirmed on the computer."}
-        return 200, {"result": "ok", "credential_id": decision["credential_id"], "username": username, "hostname": host}
-
-    path = f"/thessley-pam/v1/enroll/{request_id}/respond"
-    with approve._listening(ip, {path: respond}, args.port) as lst:
-        link = "thessleypam://enroll?" + urlencode({
-            "h": ip, "p": lst.port, "fp": lst.fingerprint, "id": request_id, "n": nonce,
-            "m": mid, "hn": host, "u": username,
-        })
-        print(f"\nAdd a phone or app that may approve ssh logins for '{username}' on {host}.\n")
-        _show_qr(link)
-        if args.link:
-            print(f"Link: {link}\n")  # for the Thessley Passkey desktop app, which cannot scan a code
-        print(f"In Thessley Passkey: scan the QR code (or paste the link). Valid for {ENROLL_WAIT // 60} minutes. Ctrl+C to cancel.",
-              flush=True)
-        try:
-            item = pending.get(timeout=ENROLL_WAIT)
-        except queue.Empty:
-            print("Timed out. Nothing was added.")
-            return 1
-        code = protocol.pairing_code(item["public_key"])
-        print(f"\n'{item['label']}' ({item['client_ip']}) answered.\n\n    Code:  {code}\n")
-        ok = _ask_yes("Does it show the same code? Type yes to add it: ", CONFIRM_WAIT)
-        if ok:
-            device = store.add_device(username, item["public_key"], item["label"], item["chain"])
-            decision.update(ok=True, credential_id=device["credential_id"])
-        decided.set()
-        threading.Event().wait(1.5)  # let the answer reach the phone before the listener shuts down
-    if ok:
-        print(f"Added '{item['label']}' as {decision['credential_id']} for {username}.")
-        return 0
-    print("Not added.")
+def _enroll_via_service(username: str) -> int:
+    """A normal user adding an approver for their own account: the service checks who is asking and what is allowed."""
+    try:
+        sock = socket.create_connection((HOST, PORT), timeout=5)
+    except OSError:
+        print("The approval service is not running, so nothing can be added. Ask an administrator.")
+        return 1
+    with sock:
+        sock.settimeout(None)
+        sock.sendall((json.dumps({"op": "enroll", "user": username}) + "\n").encode("utf-8"))
+        stream = sock.makefile("rw", encoding="utf-8")
+        for raw in stream:
+            msg = json.loads(raw)
+            if "say" in msg:
+                print(msg["say"], flush=True)
+            if "ask" in msg:
+                answer = "yes" if _ask_yes(msg["ask"], int(msg.get("timeout", CONFIRM_WAIT))) else "no"
+                stream.write(json.dumps({"answer": answer}) + "\n")
+                stream.flush()
+            if msg.get("done"):
+                return 0 if msg.get("ok") else 1
+    print("The approval service closed the connection. Nothing was added.")
     return 1
+
+
+def cmd_enroll(args) -> int:
+    me = store.normalize_user(current_user())
+    target = _user(args.user) if args.user else me
+    if _is_admin():  # administrator terminal: runs here, in this process, and may add an approver for any account
+        return 0 if enroll.run(target, print, _ask_yes, port=args.port, show_link=args.link) else 1
+    if target != me:
+        sys.exit("Only an administrator can add an approver for another account. For your own account, leave out --user.")
+    return _enroll_via_service(target)
+
+
+def cmd_self_enroll(args) -> int:
+    _need_admin()
+    if args.state in ("on", "off"):
+        grants.set_self_enroll_first(args.state == "on")
+    if grants.self_enroll_first():
+        print("On: an account with no approver at all may enrol its first one itself (from a session on this computer).")
+    else:
+        print("Off: only an administrator can add the first approver of an account.")
+    print("Adding more approvers always needs an approval from one that is already enrolled, or an administrator.")
+    return 0
 
 
 def cmd_list(args) -> int:
     _need_admin()
     names = [_user(args.user)] if args.user else sorted(
-        n[:-5] for n in __import__("os").listdir(store.users_dir()) if n.endswith(".json") and not n.startswith("."))
+        n[:-5] for n in os.listdir(store.users_dir()) if n.endswith(".json") and not n.startswith("."))
     shown = False
     for username in names:
         for d in store.devices(username):
@@ -237,8 +217,8 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="thessley-pam-win", description="Approve ssh logins to this Windows computer with Thessley Passkey")
     sub = p.add_subparsers(dest="cmd", required=True)
     en = sub.add_parser("enroll", help="add a phone or the desktop app as an approver")
-    en.add_argument("--user")
-    en.add_argument("--link", action="store_true", help="also print the link (for the desktop app)")
+    en.add_argument("--user", help="administrators only: another account (default: your own)")
+    en.add_argument("--link", action="store_true", help="administrator terminal: also print the link (a normal user always gets it)")
     en.add_argument("--port", type=int, default=approve.PORT)
     ls = sub.add_parser("list", help="show approvers")
     ls.add_argument("--user")
@@ -255,14 +235,18 @@ def main(argv=None) -> int:
     ep = sub.add_parser("end-pass", help="end passes")
     ep.add_argument("--user")
     sub.add_parser("status", help="is the service running")
+    se = sub.add_parser("self-enroll", help="may an account with no approver enrol its first one itself")
+    se.add_argument("state", nargs="?", choices=["on", "off"])
     sc = sub.add_parser("sshd-config", help="the sshd_config lines for a user")
     sc.add_argument("--user")
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # the QR code is drawn with block characters
     a = p.parse_args(argv)
     return {
         "enroll": cmd_enroll, "list": cmd_list, "remove": cmd_remove,
         "disable": lambda x: cmd_disable(x, True), "enable": lambda x: cmd_disable(x, False),
         "grace": cmd_grace, "passes": cmd_passes, "end-pass": cmd_end_pass, "status": cmd_status,
-        "sshd-config": cmd_sshd_config,
+        "sshd-config": cmd_sshd_config, "self-enroll": cmd_self_enroll,
     }[a.cmd](a)
 
 

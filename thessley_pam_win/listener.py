@@ -106,6 +106,14 @@ class Listener:
 
         class Server(ThreadingHTTPServer):
             daemon_threads = True
+            # Windows differs from Linux here: with SO_REUSEADDR (the default) a second listener can bind a port that is
+            # already in use, so two logins could share one port and the phone would reach the wrong one. Bind exclusively.
+            allow_reuse_address = False
+
+            def server_bind(self):
+                if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+                    self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+                super().server_bind()
 
             def handle_error(self, request, client_address):
                 pass  # a phone that hangs up mid-request (e.g. after a certificate mismatch) is not an error here

@@ -71,7 +71,8 @@ the window short; `thessley-pam-win end-pass` ends passes at once. Turned off by
    service as SYSTEM at boot, and starts it. `-OpenFirewall` adds one rule: TCP 47810-47819 from the local subnet, Private
    networks only, for that Python. It never touches `sshd_config`, accounts or groups.
 
-3. **Enrol an approver** (administrator terminal; see "Second approver" for the desktop app):
+3. **Enrol an approver.** An administrator can do it as below; users can also enrol themselves, without administrator rights
+   (see "Enrolling without an administrator"). Administrator terminal (see "Second approver" for the desktop app):
 
        & "C:\ProgramData\ThessleyPamWin\thessley-pam-win.cmd" enroll --user YOURNAME --link
 
@@ -169,12 +170,46 @@ The Thessley Passkey desktop app (`thessley-passkey-linux`) enrols and approves 
 or paste the link into the app. The approver must reach this computer on TCP 47810-47819 while a login waits, and the two
 clocks must agree within a minute.
 
+## Enrolling without an administrator
+
+Any user can add an approver for **their own account** (not for anyone else's) from a normal terminal:
+
+    & "C:\ProgramData\ThessleyPamWin\thessley-pam-win.cmd" enroll
+
+It shows the same link and QR code, you compare the 6-digit code on both screens and type `yes`. The tool talks to the approval
+service (SYSTEM), which does the work and applies these rules:
+
+- **Who is asking is not taken from the request.** The service asks Windows which account owns the connection and refuses a
+  request for any other account, so a user can only ever add approvers for themselves. An administrator can add one for anyone
+  (`enroll --user NAME` in an administrator terminal, as before).
+- **The first approver of an account** can be added by the user themselves, with no code, when the account has no approver at
+  all. A gated account with no approver is refused at ssh login, so nobody can get a remote shell on it to run this: it has to be a
+  session on the computer itself (console, remote desktop, or any shell already open as that user).
+  **Trade-off:** whoever can run such a session as that account (it takes the account's password) can enrol their own phone first.
+  If you do not want that, turn it off and let only administrators add the first approver:
+
+      thessley-pam-win self-enroll off        (administrator; `on` restores it; no argument shows the setting)
+
+- **More approvers** (a second phone, the desktop app) need a fresh approval from an approver that is already enrolled; the
+  new-device request appears on that phone as "adding a device". A pass never counts for this and none is created, so a stolen
+  password, a stolen key or a live pass cannot add a device.
+- **A lost phone needs an administrator.** If the account's approvers exist but are all switched off, nobody can add one
+  themselves, which keeps a lost phone from reopening the first-come route.
+- One enrolment per account at a time. Closing the terminal cancels it and frees the approval port at once.
+- The user cannot list or remove approvers, change the pass length or read the data folders; those stay administrator-only.
+
+For a user to run the tool, `thessley-pam-win.cmd` has to be readable by Users. `install.ps1` now does that; on an existing
+installation re-run it, or in an administrator PowerShell:
+
+    icacls C:\ProgramData\ThessleyPamWin\thessley-pam-win.cmd /grant "*S-1-5-32-545:(RX)"
+
 ## Daily use (administrator terminal)
 
     thessley-pam-win status                      is the service running; pass length
     thessley-pam-win list                        approvers
     thessley-pam-win disable|enable --user N ID  switch an approver off or on (its passes end with it)
     thessley-pam-win remove --user N ID          forget an approver
+    thessley-pam-win self-enroll [on|off]        may an account with no approver enrol its first one itself
     thessley-pam-win grace --hours 4             one approval counts for 4 h from the same address (0 = every login asks)
     thessley-pam-win passes                      who holds a pass
     thessley-pam-win end-pass [--user N]         end passes now
@@ -194,6 +229,9 @@ The service writes `C:\ProgramData\ThessleyPamWin\service.log` (approvals, denia
 | "the approval service is not running. Refusing." | The scheduled task `ThessleyPamWin` is not running: `Start-ScheduledTask ThessleyPamWin`, check `service.log` |
 | "no phone or app is enrolled for this account" | `thessley-pam-win list` shows nothing for that name: enrol, and use the same account name |
 | The QR code appears on every login although `grace` was set | Not elevated when `grace` ran (it only printed a hint), or the login comes from another address than the approval. `service.log` shows `pass granted` / `pass used`; `thessley-pam-win passes` lists live passes |
+| `enroll` says "you can only add an approver for your own account" | You named another account without being an administrator; leave out `--user`, or use an administrator terminal |
+| `enroll` says every approver is switched off, or the first one needs an administrator | By design (lost phone, or `self-enroll off`): ask an administrator |
+| `enroll` is denied or cannot start for a normal user | `thessley-pam-win.cmd` is not readable by Users: re-run `install.ps1` (see above) |
 | The phone cannot reach the computer | The network is "Public" in Windows (the rule is Private only), or the phone is on mobile data, or a third-party firewall blocks 47810-47819 |
 | "Phone clock is off by more than a minute" | Fix the time on the phone or on this computer |
 | The login ends right after the password with no QR code | `gate.cmd` failed to start: check the path in `ForceCommand`, and that Python is where `gate.cmd` says |
@@ -225,6 +263,10 @@ clear yes.
 - **Passes** work with a real `sshd`. After `grace --hours 4`, the first approval wrote `pass granted to <user> (from
   <address>, 4 h)`, and the next login from the same address went straight in, with no QR code: `pass used for <user>
   (from <address>, 3 h 59 min left)`.
+
+- **Enrolling without an administrator** is covered by tests against the real service and a stand-in phone (own account
+  only, first approver, approval by an existing approver, pass ignored, lost phone, switch off, closing the terminal, one at
+  a time, the command line as a normal user). It has not yet been tried with the real phone app on this computer.
 
 **Still not tested:** the service's run-as-SYSTEM status was inferred (it writes a log normal users cannot read), not
 read from the task; `sftp`/`scp` and `ssh host command` through the gate; two approvers at once; the desktop app as the

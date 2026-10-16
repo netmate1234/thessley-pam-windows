@@ -81,9 +81,14 @@ icacls $base /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(C
 icacls $base /grant '*S-1-5-32-545:(RX)' | Out-Null                      # Users: this folder only, to reach what is below
 icacls $app /grant '*S-1-5-32-545:(OI)(CI)RX' | Out-Null                 # Users: the program (the gate runs as them)
 icacls (Join-Path $base 'gate.cmd') /grant '*S-1-5-32-545:(RX)' | Out-Null
+# Users may run the admin tool too: only `enroll` (for their own account) works without administrator rights; the service
+# decides who is asking and what is allowed, and the data folders stay closed to them.
+icacls (Join-Path $base 'thessley-pam-win.cmd') /grant '*S-1-5-32-545:(RX)' | Out-Null
 foreach ($d in 'users', 'grants') { New-Item -ItemType Directory -Force (Join-Path $base $d) | Out-Null }
 
 # --- 4. the service ------------------------------------------------------------------------------------------------
+# On an upgrade the old service may still be running (and holding its port): stop it first. Passes end with it.
+Stop-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue
 Unregister-ScheduledTask -TaskName $task -Confirm:$false -ErrorAction SilentlyContinue
 $action    = New-ScheduledTaskAction -Execute $Python -Argument "-I -X utf8 `"$app\daemon_main.py`""
 $trigger   = New-ScheduledTaskTrigger -AtStartup

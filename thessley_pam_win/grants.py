@@ -66,6 +66,21 @@ def set_grace(hours: float) -> None:
     _atomic_write(_config_path(), data, store.BASE)
 
 
+def self_enroll_first() -> bool:
+    """May an account with no approver at all enrol its first one itself? On by default; `self-enroll off` closes it."""
+    return _load_config().get("self_enroll_first", True) is not False
+
+
+def set_self_enroll_first(on: bool) -> None:
+    store.ensure_dirs()
+    data = _load_config()
+    if on:
+        data.pop("self_enroll_first", None)
+    else:
+        data["self_enroll_first"] = False
+    _atomic_write(_config_path(), data, store.BASE)
+
+
 def _atomic_write(path: str, data, directory: str) -> None:
     fd, tmp = tempfile.mkstemp(dir=directory, prefix=".tmp.")
     try:
