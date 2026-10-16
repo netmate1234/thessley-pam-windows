@@ -50,6 +50,34 @@ class FakePhone:
         return resp.status, data
 
 
+def _post_answer(link: str, body: dict):
+    """POST `body` to the computer named in `link`, trusting only the certificate in the link."""
+    parts = urlsplit(link)
+    q = {k: v[0] for k, v in parse_qs(parts.query).items()}
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    conn = http.client.HTTPSConnection(q["h"], int(q["p"]), context=ctx, timeout=10)
+    conn.connect()
+    assert hashlib.sha256(conn.sock.getpeercert(binary_form=True)).hexdigest() == q["fp"], "certificate does not match the link"
+    conn.request("POST", f"/thessley-pam/v1/{parts.netloc}/{q['id']}/respond", json.dumps(body).encode(),
+                 {"Content-Type": "application/json"})
+    resp = conn.getresponse()
+    data = json.loads(resp.read())
+    conn.close()
+    return resp.status, data
+
+
+def answer_unsigned(phone, link: str, action: str = "deny", *, nonce=None, credential_id=None):
+    """An answer with no signature, as the phone sends a refusal. nonce=None: the request's own nonce; False: leave it out;
+    a string: that value."""
+    q = {k: v[0] for k, v in parse_qs(urlsplit(link).query).items()}
+    body = {"credential_id": credential_id or phone.credential_id, "action": action, "timestamp": int(time.time())}
+    if nonce is not False:
+        body["nonce"] = q["n"] if nonce is None else nonce
+    return _post_answer(link, body)
+
+
 def link_from(lines):
     for line in lines:
         if line.startswith("Link: "):

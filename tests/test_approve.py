@@ -5,7 +5,9 @@ import unittest
 
 from thessley_pam_win import approve, grants, store
 
-from fakephone import FakePhone, wait_for_link
+from urllib.parse import parse_qs, urlsplit
+
+from fakephone import FakePhone, answer_unsigned, wait_for_link
 
 IP = "127.0.0.1"
 
@@ -62,6 +64,57 @@ class ApproveTests(Base):
         t.join(20)
         self.assertFalse(result["ok"])
         self.assertIn("denied", " ".join(self.lines).lower())
+
+    def test_deny_without_a_signature(self):
+        """The phone says no without asking for a fingerprint: the request's nonce stands in for the signature."""
+        phone = FakePhone("alice")
+        t, result = self.start()
+        status, data = answer_unsigned(phone, wait_for_link(self.lines))
+        t.join(20)
+        self.assertEqual((status, data["result"]), (200, "ok"))
+        self.assertFalse(result["ok"])
+        self.assertIn("denied", " ".join(self.lines).lower())
+        self.assertTrue(any("no signature" in m for m, _ in self.logs))
+
+    def test_unsigned_answers_that_must_not_count(self):
+        phone = FakePhone("alice")
+        t, result = self.start()
+        link = wait_for_link(self.lines)
+        self.assertEqual(answer_unsigned(phone, link, "approve")[0], 400)             # an approval always needs the signature
+        self.assertEqual(answer_unsigned(phone, link, nonce="wrong-nonce-value")[0], 400)  # a refusal needs the real nonce
+        self.assertEqual(answer_unsigned(phone, link, nonce=False)[0], 400)
+        self.assertEqual(answer_unsigned(phone, link, nonce="n\u00e4\u00f6")[0], 400)    # non-ASCII is a mismatch, not an error
+        self.assertEqual(answer_unsigned(phone, link, credential_id="c_0000000000000000")[0], 403)  # and an enrolled phone
+        self.assertEqual(phone.answer(link)[0], 200)                                  # the real approval still works
+        t.join(20)
+        self.assertTrue(result["ok"])
+
+    def test_an_unsigned_refusal_from_another_users_phone_is_refused(self):
+        FakePhone("alice")
+        mallory = FakePhone("mallory")
+        t, result = self.start()
+        link = wait_for_link(self.lines)
+        self.assertEqual(answer_unsigned(mallory, link)[0], 403)
+        t.join(20)
+        self.assertFalse(result["ok"])  # nobody legitimate answered
+
+    def test_the_link_says_what_the_approval_is_for(self):
+        """Display-only fields so the apps can say "ssh login from 192.168.1.50" instead of a bare "sudo"."""
+        phone = FakePhone("alice")
+        t, result = self.start(rhost="192.168.1.50")
+        link = wait_for_link(self.lines)
+        q = {k: v[0] for k, v in parse_qs(urlsplit(link).query).items()}
+        self.assertEqual((q["s"], q["r"], q["tty"]), ("sshd", "192.168.1.50", "ssh"))
+        phone.answer(link, "deny")
+        t.join(20)
+
+    def test_a_hostile_address_is_left_out_of_the_link(self):
+        phone = FakePhone("alice")
+        t, result = self.start(rhost="not an address;rm")
+        link = wait_for_link(self.lines)
+        self.assertNotIn("r", {k for k in parse_qs(urlsplit(link).query)})
+        phone.answer(link, "deny")
+        t.join(20)
 
     def test_bad_signature_is_ignored_and_the_real_answer_still_works(self):
         phone = FakePhone("alice")

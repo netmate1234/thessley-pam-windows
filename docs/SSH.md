@@ -18,6 +18,11 @@ Windows OpenSSH has no PAM, so the approval cannot sit inside the authentication
    service says (the link and the QR code) into the ssh terminal, and waits.
 4. The service (runs as **SYSTEM**) opens a short-lived HTTPS listener with a throw-away certificate whose SHA-256 is in the
    link, waits for a signed `approve` from one of the account's enrolled approvers, and answers the gate yes or no.
+   A **refusal** (`deny`) may arrive without a signature, so the phone does not ask for a fingerprint to say no: it then
+   carries the request's own nonce, which only the person who saw the link has. An approval always needs the signature, and
+   an unsigned answer from a phone that is not enrolled for the account is refused. (Same rule as thessley-pam-linux.)
+   The link also carries two display-only fields, `s` (the service, `sshd`) and `r` (the client's address), so the apps can say
+   "ssh login from ..." instead of a bare "sudo"; the signature does not cover them, so they can mislead but never approve.
 5. Only a clear yes makes the gate start the person's shell, or the command they gave to `ssh`. Denial, timeout, a bad
    signature, no approver enrolled, the service not running, any error: the connection ends. Refused by default.
 
@@ -267,6 +272,10 @@ clear yes.
 - **Enrolling without an administrator** is covered by tests against the real service and a stand-in phone (own account
   only, first approver, approval by an existing approver, pass ignored, lost phone, switch off, closing the terminal, one at
   a time, the command line as a normal user). It has not yet been tried with the real phone app on this computer.
+
+- **Refusal without a signature** (the phone's "no" without a fingerprint) and the display-only link fields are covered by
+  tests with a stand-in phone: an unsigned deny with the real nonce works; an unsigned approval, a wrong, missing or
+  non-ASCII nonce, and an unenrolled or other user's phone are refused. Not yet tried with the updated phone app.
 
 **Still not tested:** the service's run-as-SYSTEM status was inferred (it writes a log normal users cannot read), not
 read from the task; `sftp`/`scp` and `ssh host command` through the gate; two approvers at once; the desktop app as the

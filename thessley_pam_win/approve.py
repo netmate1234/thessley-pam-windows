@@ -8,7 +8,9 @@ unreachable phone, no approver enrolled, any error) returns False: refused by de
 
 import contextlib
 import errno
+import hmac
 import os
+import re
 import secrets
 import threading
 import time
@@ -22,6 +24,18 @@ PORT = 47810
 PORT_TRIES = 10  # logins at the same time each need a listener; the next free port from PORT is used
 WAIT = 60        # seconds to approve
 REQUEST_TYPE = "sudo"  # what the apps call an approval for a command-line login (thessley-pam uses the same for ssh)
+
+
+def _display_fields(service: str, rhost: str) -> dict:
+    """Optional link fields the apps show ("ssh login from 192.168.1.111" instead of a bare "sudo"). Display only:
+    the signature does not cover them, so a wrong value can mislead a person but never approve anything."""
+    out = {}
+    svc = re.sub(r"[^a-z0-9_-]", "", service.lower())[:32]
+    if svc:
+        out["s"] = svc
+    if rhost and rhost != grants.LOCAL and re.fullmatch(r"[0-9A-Fa-f.:]{1,45}", rhost):
+        out["r"] = rhost
+    return out
 
 
 @contextlib.contextmanager
@@ -93,7 +107,9 @@ def run(username: str, rhost: str, tty: str, say: Callable[[str], None], log: Ca
             cred = str(body["credential_id"])
             action = str(body["action"])
             timestamp = int(body["timestamp"])
-            signature = str(body["signature"])
+            # A "deny" may come without a signature (the phone does not ask for a fingerprint to say no); it must then
+            # carry the request's nonce, which only the person who saw the link has. A refusal grants nothing.
+            signature = str(body["signature"]) if "signature" in body else ""
         except (KeyError, TypeError, ValueError):
             return 400, {"result": "error", "message": "Missing fields."}
         device = by_id.get(cred)
@@ -103,13 +119,20 @@ def run(username: str, rhost: str, tty: str, say: Callable[[str], None], log: Ca
             return 400, {"result": "error", "message": "Unknown action."}
         if not protocol.timestamp_ok(timestamp):
             return 400, {"result": "error", "message": "Phone clock is off by more than a minute."}
-        msg = protocol.canonical(REQUEST_TYPE, request_id, mid, username, nonce, timestamp, action)
-        if not protocol.verify(device["public_key"], signature, msg):
-            log(f"bad signature from {client_ip} for {username} ({cred})", True)
-            return 400, {"result": "error", "message": "Signature did not verify."}
+        unsigned = not signature
+        if unsigned:
+            # compared as bytes: a non-ASCII value must be a plain mismatch, not an error
+            if action != "deny" or not hmac.compare_digest(str(body.get("nonce", "")).encode("utf-8"), nonce.encode("utf-8")):
+                log(f"unsigned answer refused from {client_ip} for {username} ({cred}, {action})", True)
+                return 400, {"result": "error", "message": "Only a refusal can be sent without a signature."}
+        else:
+            msg = protocol.canonical(REQUEST_TYPE, request_id, mid, username, nonce, timestamp, action)
+            if not protocol.verify(device["public_key"], signature, msg):
+                log(f"bad signature from {client_ip} for {username} ({cred})", True)
+                return 400, {"result": "error", "message": "Signature did not verify."}
         if not taken.acquire(blocking=False):
             return 409, {"result": "error", "message": "This request has already been answered."}
-        outcome.update(action=action, cred=cred, label=device.get("label", ""), ip=client_ip)
+        outcome.update(action=action, cred=cred, label=device.get("label", ""), ip=client_ip, unsigned=unsigned)
         done.set()
         return 200, {"result": "ok"}
 
@@ -119,11 +142,12 @@ def run(username: str, rhost: str, tty: str, say: Callable[[str], None], log: Ca
             link = f"thessleypam://{REQUEST_TYPE}?" + urlencode({
                 "h": ip, "p": lst.port, "fp": lst.fingerprint, "id": request_id, "n": nonce,
                 "m": mid, "hn": host, "u": username, "tty": tty,
+                **(_display_fields("sshd", rhost) if tty == "ssh" else {}),
             })
             what = "adding a device for" if tty == "add-device" else "the ssh login for"
             say(f"Approve {what} {username} on {host} with Thessley Passkey (within {int(wait)} s):")
             say(f"Link: {link}")  # above the QR code, so it stays in view when the code scrolls the screen
-            for line in qr.lines(link):
+            for line in qr.lines(link, border=2):
                 say(line)
             if grace > 0 and grant_pass:
                 say(f"After you approve, your next login from {rhost} needs no approval for {grace:g} h.")
@@ -149,7 +173,8 @@ def run(username: str, rhost: str, tty: str, say: Callable[[str], None], log: Ca
         return False
     if outcome["action"] != "approve":
         say("Thessley Passkey: denied.")
-        log(f"denied by {outcome['label']!r} ({outcome['cred']}) for {username} (from {rhost})", True)
+        how = ", no signature" if outcome.get("unsigned") else ""
+        log(f"denied by {outcome['label']!r} ({outcome['cred']}{how}) for {username} (from {rhost})", True)
         return False
 
     try:
