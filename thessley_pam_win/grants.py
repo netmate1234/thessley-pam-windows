@@ -1,0 +1,177 @@
+"""Passes: after one approval, the same user logging in over ssh from the same address needs no new approval for a
+set number of hours.
+
+    thessley-pam-win grace --hours 4         turn it on (0 = every login asks, the default)
+    thessley-pam-win passes                  who holds a pass right now
+    thessley-pam-win end-pass [--user NAME]  end passes at once
+
+A pass is one entry in C:\\ProgramData\\ThessleyPamWin\\grants\\<user>.json (SYSTEM and Administrators only; the service
+empties the folder every time it starts, so a restart ends every pass):
+
+    rhost        where the login came from (the client's address from SSH_CONNECTION)
+    credential   the approver that approved; if it is removed or switched off the pass stops working
+    expires_at   fixed from the moment of the approval; using a pass does not extend it
+
+What a pass does NOT know: which password or key was used. It is tied to the user and the client's address, so whoever
+gets past the password step from the same address during the window is let through without a new approval. Keep the
+window short and end passes (end-pass) when in doubt.
+"""
+
+import json
+import os
+import shutil
+import tempfile
+import time
+
+from . import store
+
+MAX_HOURS = 24.0
+LOCAL = "-"
+
+
+def _config_path() -> str:
+    return os.path.join(store.BASE, "config.json")
+
+
+def _grants_dir() -> str:
+    return os.path.join(store.BASE, "grants")
+
+
+def _load_config() -> dict:
+    try:
+        with open(_config_path(), encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def grace_hours() -> float:
+    """Hours an approval stays valid; 0 means every login asks (the default)."""
+    try:
+        hours = float(_load_config().get("grace", 0))
+    except (TypeError, ValueError):
+        return 0.0
+    return min(max(hours, 0.0), MAX_HOURS)
+
+
+def set_grace(hours: float) -> None:
+    hours = min(max(float(hours), 0.0), MAX_HOURS)
+    store.ensure_dirs()
+    data = _load_config()
+    if hours > 0:
+        data["grace"] = hours
+    else:
+        data.pop("grace", None)
+    _atomic_write(_config_path(), data, store.BASE)
+
+
+def _atomic_write(path: str, data, directory: str) -> None:
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".tmp.")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+
+
+def _path(username: str) -> str:
+    return os.path.join(_grants_dir(), f"{store.normalize_user(username)}.json")
+
+
+def _load(username: str) -> list[dict]:
+    try:
+        with open(_path(username), encoding="utf-8") as f:
+            items = json.load(f)
+        return [i for i in items if isinstance(i, dict)] if isinstance(items, list) else []
+    except (OSError, ValueError):
+        return []
+
+
+def _save(username: str, items: list[dict]) -> None:
+    path = _path(username)
+    if not items:
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        return
+    os.makedirs(_grants_dir(), exist_ok=True)
+    _atomic_write(path, items, _grants_dir())
+
+
+def _live(items: list[dict], now: float) -> list[dict]:
+    return [i for i in items if isinstance(i.get("expires_at"), (int, float)) and i["expires_at"] > now]
+
+
+def clear_all() -> None:
+    """Forget every pass (the service does this when it starts)."""
+    shutil.rmtree(_grants_dir(), ignore_errors=True)
+
+
+def valid(username: str, rhost: str, active_credentials, now: float | None = None) -> dict | None:
+    """The pass that lets this login through, or None. `active_credentials`: credential ids of the user's approvers
+    that may still approve (a pass of a removed or switched-off approver is worthless)."""
+    now = time.time() if now is None else now
+    rhost = rhost or LOCAL
+    active = set(active_credentials)
+    for item in _live(_load(username), now):
+        if item.get("rhost") == rhost and item.get("credential") in active:
+            return item
+    return None
+
+
+def add(username: str, rhost: str, hours: float, credential: str, now: float | None = None) -> dict:
+    """Record an approval. An earlier pass for the same user and place is replaced."""
+    now = time.time() if now is None else now
+    rhost = rhost or LOCAL
+    hours = min(max(float(hours), 0.0), MAX_HOURS)
+    entry = {"rhost": rhost, "credential": credential, "approved_at": int(now), "expires_at": int(now + hours * 3600)}
+    items = [i for i in _live(_load(username), now) if i.get("rhost") != rhost]
+    items.append(entry)
+    _save(username, items)
+    return entry
+
+
+def all_passes(now: float | None = None) -> list[dict]:
+    """Every live pass on this computer, with the user's name added."""
+    now = time.time() if now is None else now
+    out = []
+    try:
+        names = sorted(n[:-5] for n in os.listdir(_grants_dir()) if n.endswith(".json") and not n.startswith("."))
+    except OSError:
+        return out
+    for name in names:
+        out.extend({"user": name, **i} for i in _live(_load(name), now))
+    return out
+
+
+def revoke(username: str | None = None) -> int:
+    """End passes (all of a user's, or everyone's). Returns how many ended."""
+    ended = 0
+    users = [username] if username else sorted({p["user"] for p in all_passes()})
+    for name in users:
+        ended += len(_load(name))
+        _save(name, [])
+    return ended
+
+
+def revoke_credential(username: str, credential: str) -> int:
+    """End every pass that one approver granted (called when it is removed or switched off)."""
+    items = _load(username)
+    keep = [i for i in items if i.get("credential") != credential]
+    if len(keep) != len(items):
+        _save(username, keep)
+    return len(items) - len(keep)
+
+
+def remaining(entry: dict, now: float | None = None) -> str:
+    seconds = max(0, int(entry["expires_at"] - (time.time() if now is None else now)))
+    h, m = divmod(seconds // 60, 60)
+    return f"{h} h {m:02d} min" if h else f"{m} min"

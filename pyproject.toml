@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "thessley-pam-windows"
+version = "0.1.0"
+description = "Approve ssh logins to Windows 11 with Thessley Passkey (password first, then phone or desktop approval)"
+requires-python = ">=3.10"
+dependencies = ["cryptography", "qrcode"]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[project.scripts]
+thessley-pam-win = "thessley_pam_win.cli:main"
+
+[tool.setuptools]
+packages = ["thessley_pam_win"]
+
+[tool.pytest.ini_options]
+pythonpath = [".", "tests"]
+testpaths = ["tests"]
