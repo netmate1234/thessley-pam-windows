@@ -160,7 +160,7 @@ If the key is lost, nobody can log in to that account over ssh. Keep a second wa
 
        ssh YOURNAME@this-computer
        (password)
-       Approve the ssh login for YOURNAME on THIS-COMPUTER with Thessley Passkey (within 60 s):
+       Approve the ssh login for YOURNAME on THIS-COMPUTER with Thessley Passkey (within 90 s):
        Link: thessleypam://sudo?...
        <QR code>
        (approve on the phone, or:  thessley-passkey respond 'thessleypam://sudo?...' --approve )

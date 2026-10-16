@@ -22,7 +22,7 @@ from .listener import Listener
 
 PORT = 47810
 PORT_TRIES = 10  # logins at the same time each need a listener; the next free port from PORT is used
-WAIT = 60        # seconds to approve
+WAIT = 90        # seconds to approve (unlock the phone, find the app): the same as thessley-pam-linux
 REQUEST_TYPE = "sudo"  # what the apps call an approval for a command-line login (thessley-pam uses the same for ssh)
 
 
@@ -75,13 +75,14 @@ def _listening(ip: str, routes: dict, port: int = PORT):
 
 
 def run(username: str, rhost: str, tty: str, say: Callable[[str], None], log: Callable[[str, bool], None] | None = None,
-        *, ip: str | None = None, port: int = PORT, wait: float = WAIT, cancel: threading.Event | None = None,
+        *, ip: str | None = None, port: int = PORT, wait: float | None = None, cancel: threading.Event | None = None,
         use_pass: bool = True, grant_pass: bool = True) -> bool:
     """Ask for an approval for `username` logging in from `rhost`. `say(line)` shows a line to the person.
 
     `use_pass=False` ignores an existing pass and `grant_pass=False` records none: used when the approval is for adding
     an approver, which must never ride on a pass."""
     log = log or (lambda msg, warn=False: None)
+    wait = WAIT if wait is None else wait  # read now, not when the function was defined, so tests can shorten it
     try:
         username = store.normalize_user(username)
         devices = store.active_devices(username)

@@ -16,7 +16,7 @@ import subprocess
 import sys
 
 HOST, PORT = "127.0.0.1", 47800
-WAIT_FOR_SERVICE = 150  # seconds: the approval itself is 60, plus margin
+WAIT_FOR_SERVICE = 150  # seconds: the approval itself is 90 (approve.WAIT), plus margin
 
 
 def current_user() -> str:

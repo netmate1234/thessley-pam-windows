@@ -165,6 +165,19 @@ class ApproveTests(Base):
         self.assertFalse(result["ok"])
         self.assertIn("no answer", " ".join(self.lines).lower())
 
+    def test_the_approval_window_is_90_seconds_like_linux_and_read_when_used(self):
+        self.assertEqual(approve.WAIT, 90)
+        FakePhone("alice")
+        saved, approve.WAIT = approve.WAIT, 1.5
+        try:
+            started = time.monotonic()
+            ok = approve.run("alice", "192.168.1.50", "ssh", self.lines.append, ip=IP, port=47880)  # no wait argument
+            took = time.monotonic() - started
+        finally:
+            approve.WAIT = saved
+        self.assertFalse(ok)
+        self.assertLess(took, 10)  # it used the shortened setting, not the 90 s it was defined with
+
     def test_no_approver_enrolled_refuses_without_asking(self):
         t, result = self.start()
         t.join(20)

@@ -88,12 +88,14 @@ class EndToEnd(unittest.TestCase):
     def test_wrong_users_phone_cannot_open_the_door(self):
         FakePhone("alice")
         mallory = FakePhone("mallory")
+        self._wait, approve.WAIT = approve.WAIT, 3  # nobody answers: do not sit through the real approval window
+        self.addCleanup(setattr, approve, "WAIT", self._wait)
         t, out, result = self.run_gate()
         link = wait_for_link(out)
         self.assertEqual(mallory.answer(link)[0], 403)
         # nobody else answers: stop the wait early by closing from the gate's side is not possible here,
         # so shorten it through the service-side approval wait
-        t.join(90)
+        t.join(30)
         self.assertEqual(result["code"], 1)
         self.assertEqual(self.ran, [])
 
