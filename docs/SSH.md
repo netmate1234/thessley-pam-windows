@@ -168,8 +168,8 @@ clear yes.
   `gate.cmd` can be changed, and the admin tool is closed to them.
 - The running service refuses an account that is not enrolled, and rejects garbage, a bad address and a path-trick user name.
 - After `sshd` was restarted with the `Match User` block, a password login for that account from another computer on the
-  LAN was accepted, and the account's owner reported the QR code, link and approval working. The approval itself is
-  recorded in `service.log`; that line was not inspected by the author.
+  LAN was accepted, and the account's owner said it "seems to work". The QR code, the link and the approval were not
+  confirmed in `service.log` (administrators only); that line was not inspected.
 
 **Still not tested:** the service's run-as-SYSTEM status was inferred, not read; `sftp`/`scp` and `ssh host command`
 through the gate; two approvers at once; passes with a real `sshd`; and the real phone app against this server.
@@ -182,8 +182,9 @@ Do those first on an account you can recover, with a second session open.
 - **`sshd` reads `sshd_config` only when it starts.** A login right after editing the file runs on the old rules, so there
   is no gate and no QR code. Restart the service (administrator), after `sshd.exe -t` prints nothing.
 - **"Cannot open service sshd"** means the PowerShell window is not elevated.
-- **`Restart-Service` cannot find the service** if it was removed; register it again with `New-Service` (see the
-  OpenSSH package's own service settings) and run `sc.exe sidtype sshd unrestricted`.
+- After a failed `Restart-Service` the service briefly looked missing (error 1060 from a normal window). `New-Service`
+  then said it already existed, and `sc.exe sidtype sshd unrestricted` plus `Start-Service sshd` brought it up (and left it
+  on Automatic start). The cause was not determined.
 - **Notepad does not show `sshd_config`**: `C:\ProgramData` is hidden and the file has no extension. Use
   `notepad C:\ProgramData\ssh\sshd_config` from an administrator PowerShell.
 - Windows classes many home Wi-Fi networks as **Public**; the approval firewall rule is Private-only unless you install with
