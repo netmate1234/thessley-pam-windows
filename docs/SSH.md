@@ -1,7 +1,7 @@
 # ssh to Windows 11: password first, then a phone or desktop-app approval
 
-For chosen Windows accounts, `ssh` asks for the account's **password** and then shows a **QR code and a
-`thessleypam://` link**. The login continues only after an enrolled phone (or the Thessley Passkey desktop app) approves
+For chosen Windows accounts, `ssh` asks for the account's **password** (or accepts its **ssh key**, see
+"Key instead of password") and then shows a **QR code and a `thessleypam://` link**. The login continues only after an enrolled phone (or the Thessley Passkey desktop app) approves
 it with a signature. Optionally, one approval then counts for N hours from the same address (a "pass").
 
 This is the Windows counterpart of [thessley-pam-linux](../../thessley-pam-linux/docs/SSH.md). It speaks the same
@@ -11,7 +11,8 @@ protocol, so the same phone app and the same desktop app (`thessley-passkey resp
 
 Windows OpenSSH has no PAM, so the approval cannot sit inside the authentication step. It sits right after it:
 
-1. `sshd` checks the password (`AuthenticationMethods password`). A wrong password never gets further.
+1. `sshd` checks the first factor: the password (`AuthenticationMethods password`) or the ssh key (`publickey`). A wrong password
+   or an unknown key never gets further.
 2. For the chosen account, `sshd_config` has `ForceCommand gate.cmd`. `sshd` starts the **gate** instead of the user's shell.
 3. The gate (runs as the user, standard library only) asks the **approval service** over `127.0.0.1:47800`, prints what the
    service says (the link and the QR code) into the ssh terminal, and waits.
@@ -27,7 +28,7 @@ approvers or writes passes, or that person could add their own phone or forge a 
 |---|---|---|
 | Where the approval sits | inside PAM, before the session | `ForceCommand`, after the password, before the shell |
 | Who keeps approvers and passes | root | a SYSTEM service; the folder is closed to normal users |
-| First factor | ssh key (then phone) | account password (then phone) |
+| First factor | ssh key (then phone) | account password or ssh key (then phone), your choice per account |
 | Passes end | on reboot (tmpfs) | when the service starts (every boot) |
 | Wire protocol, apps | same | same |
 
@@ -43,6 +44,10 @@ the window short; `thessley-pam-win end-pass` ends passes at once. Turned off by
 - The gate protects the shell and the commands. Port forwarding, agent and X11 forwarding are switched off for the account
   in the `Match` block (below); without that a forwarding-only connection would never reach the gate.
 - `sftp` and `scp` go through the gate too (they are forced commands); that path is **not tested** here.
+- **Gating an administrator account** is possible but weakens what the gate protects: the session then runs elevated, so
+  it can change `C:\ProgramData\ThessleyPamWin` (add an approver, forge a pass), and a pass is then 4 hours of administrator
+  access from that address. Windows also reads that account's key from `administrators_authorized_keys`, not from its own
+  `.ssh` folder. Prefer a normal account for ssh, and use `runas` or an elevated local session for administration.
 - Only accounts named in a `Match User` block are gated. Every other account keeps the settings in `sshd_config`.
 - Account names may contain only letters, digits, `.`, `_`, `-` (the signed message cannot carry spaces).
 - Treat the approver like the phone: screen lock, disk encryption. If the only phone is lost nobody can log in over ssh:
@@ -97,9 +102,41 @@ the window short; `thessley-pam-win end-pass` ends passes at once. Turned off by
        Restart-Service sshd
 
    Keep one working session open while you try a new login, and keep a copy of `sshd_config`.
+   (The `sshd-config` command prints the password variant; for the key variant use the block under "Key instead of password".)
 
    If `YOURNAME` is an **administrator**, the stock `Match Group administrators` block at the end of the file also
    applies. Put your `Match User` block **above** it (sshd uses the first value it finds for each setting).
+
+**Key instead of password**
+
+The block above uses the password (`PubkeyAuthentication no`), so an ssh key you add for that account is **ignored**. To use the key
+as the first factor instead (the Linux way: key, then phone), change the account's block:
+
+    Match User YOURNAME
+        PasswordAuthentication no
+        PubkeyAuthentication yes
+        KbdInteractiveAuthentication no
+        AuthenticationMethods publickey
+        AllowTcpForwarding no
+        AllowAgentForwarding no
+        X11Forwarding no
+        PermitTunnel no
+        PermitTTY yes
+        ForceCommand C:\ProgramData\ThessleyPamWin\gate.cmd
+
+The password is then not accepted at all for that account. Key, **then** password, **then** phone (strictest) is
+`AuthenticationMethods publickey,password` with both `PasswordAuthentication yes` and `PubkeyAuthentication yes`.
+Restart `sshd` afterwards, as above (`sshd -t` first).
+
+On Windows the key must be where `sshd` looks, with permissions it accepts, or it is silently ignored:
+
+- an account that is **not** an administrator: `C:\Users\NAME\.ssh\authorized_keys`;
+- an **administrator** account: `C:\ProgramData\ssh\administrators_authorized_keys` (the stock `Match Group administrators`
+  block); only SYSTEM and Administrators may have access to it;
+- the file must be readable only by that account, SYSTEM and Administrators (OpenSSH ships
+  `FixUserFilePermissions.ps1` / `FixHostFilePermissions.ps1` in `C:\Program Files\OpenSSH` for this).
+
+If the key is lost, nobody can log in to that account over ssh. Keep a second way in (another account, or the console).
 
 5. **Firewall for ssh itself** (port 22) is a separate matter and not touched here. The OpenSSH installer's rule covers
    Private networks only.
@@ -161,6 +198,8 @@ The service writes `C:\ProgramData\ThessleyPamWin\service.log` (approvals, denia
 | "Phone clock is off by more than a minute" | Fix the time on the phone or on this computer |
 | The login ends right after the password with no QR code | `gate.cmd` failed to start: check the path in `ForceCommand`, and that Python is where `gate.cmd` says |
 | QR code looks broken | The terminal is not UTF-8 or too narrow; use the `Link:` line with the desktop app |
+| An ssh key is added but the password is still asked | The account's `Match` block says `PubkeyAuthentication no` (the password variant). Use the key block above and restart `sshd` |
+| The key is ignored although the block allows keys | Wrong file (`C:\Users\NAME\.ssh\authorized_keys`, or `administrators_authorized_keys` for an administrator) or permissions too open: `sshd` ignores it without saying so; the OpenSSH event log shows the reason |
 | Still asked for a public key | A `Match` block for the user is missing, or above a more general block that sets `PubkeyAuthentication` |
 | `Restart-Service sshd` fails | Run `sshd.exe -t` and read the line it names |
 
@@ -180,6 +219,9 @@ clear yes.
 - After `sshd` was restarted with the `Match User` block, a password login for that account from another computer on the
   LAN was accepted, the QR code and link were shown, and `service.log` recorded `approved by '<phone>' ... for <user>`.
   The approval came from the phone, over the pinned-certificate listener, not from the ssh client.
+- **Key instead of password** works: with the `publickey` block, `sshd` accepted the account's ed25519 key and the gate then
+  ran (`service.log`: `pass used for <user> ...`, no new approval needed inside the pass window). A fresh key login that
+  needs a new approval was not separately exercised, but it takes the same gate path.
 - **Passes** work with a real `sshd`. After `grace --hours 4`, the first approval wrote `pass granted to <user> (from
   <address>, 4 h)`, and the next login from the same address went straight in, with no QR code: `pass used for <user>
   (from <address>, 3 h 59 min left)`.
