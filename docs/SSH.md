@@ -79,7 +79,7 @@ the window short; `thessley-pam-win end-pass` ends passes at once. Turned off by
 3. **Enrol an approver.** An administrator can do it as below; users can also enrol themselves, without administrator rights
    (see "Enrolling without an administrator"). Administrator terminal (see "Second approver" for the desktop app):
 
-       & "C:\ProgramData\ThessleyPamWin\thessley-pam-win.cmd" enroll --user YOURNAME --link
+       & "C:\ProgramData\ThessleyPamWin\thessley-pam-win.cmd" enroll --user YOURNAME
 
    Scan the QR code with the phone app, or paste the link into the desktop app, compare the 6-digit code on both screens
    and type `yes`.

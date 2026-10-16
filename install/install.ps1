@@ -113,7 +113,7 @@ Write-Host @"
 Installed. Next steps (nothing below has been done for you):
 
   1. Add an approver for your Windows account (phone, or the desktop app):
-       & '$cli' enroll --user YOURNAME --link
+       & '$cli' enroll --user YOURNAME
   2. Allow the phone to reach this computer while a login waits (TCP 47810-47819, same Wi-Fi). Either re-run this
      script with -OpenFirewall, or add your own rule. A phone on a network Windows calls "Public" will not get through.
   3. Print the sshd_config lines for your account:

@@ -3,7 +3,7 @@
 Anyone may run `enroll` for their OWN account (the approval service checks who is asking and applies the rules in daemon.py).
 Everything else needs an administrator terminal.
 
-    thessley-pam-win enroll [--user NAME] [--link]   add a phone or the desktop app as an approver (QR code, then a code check)
+    thessley-pam-win enroll [--user NAME]            add a phone or the desktop app as an approver (link and QR code, then a code check)
     thessley-pam-win list [--user NAME]              show approvers
     thessley-pam-win remove --user NAME ID           forget an approver (its passes end with it)
     thessley-pam-win disable|enable --user NAME ID   switch an approver off or on without forgetting it
@@ -100,7 +100,7 @@ def cmd_enroll(args) -> int:
     me = store.normalize_user(current_user())
     target = _user(args.user) if args.user else me
     if _is_admin():  # administrator terminal: runs here, in this process, and may add an approver for any account
-        return 0 if enroll.run(target, print, _ask_yes, port=args.port, show_link=args.link) else 1
+        return 0 if enroll.run(target, print, _ask_yes, port=args.port) else 1  # the link is always printed, above the QR code
     if target != me:
         sys.exit("Only an administrator can add an approver for another account. For your own account, leave out --user.")
     return _enroll_via_service(target)
@@ -218,7 +218,7 @@ def main(argv=None) -> int:
     sub = p.add_subparsers(dest="cmd", required=True)
     en = sub.add_parser("enroll", help="add a phone or the desktop app as an approver")
     en.add_argument("--user", help="administrators only: another account (default: your own)")
-    en.add_argument("--link", action="store_true", help="administrator terminal: also print the link (a normal user always gets it)")
+    en.add_argument("--link", action="store_true", help="accepted, no longer needed: the link is always printed (as in thessley-pam-linux)")
     en.add_argument("--port", type=int, default=approve.PORT)
     ls = sub.add_parser("list", help="show approvers")
     ls.add_argument("--user")
