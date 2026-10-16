@@ -104,7 +104,16 @@ the window short; `thessley-pam-win end-pass` ends passes at once. Turned off by
 5. **Firewall for ssh itself** (port 22) is a separate matter and not touched here. The OpenSSH installer's rule covers
    Private networks only.
 
-6. Log in from another computer:
+6. **Optional: passes.** Off by default, so every login asks. To let one approval count for 4 hours from the same address
+   (administrator):
+
+       & "C:\ProgramData\ThessleyPamWin\thessley-pam-win.cmd" grace --hours 4
+
+   It prints `One approval counts for 4 h from the same address.` In a window that is not elevated it only says to run it as
+   administrator and changes nothing. The pass is created by the next approval *after* you set this, and a login from
+   another address asks again.
+
+7. Log in from another computer:
 
        ssh YOURNAME@this-computer
        (password)
@@ -147,6 +156,7 @@ The service writes `C:\ProgramData\ThessleyPamWin\service.log` (approvals, denia
 |---|---|
 | "the approval service is not running. Refusing." | The scheduled task `ThessleyPamWin` is not running: `Start-ScheduledTask ThessleyPamWin`, check `service.log` |
 | "no phone or app is enrolled for this account" | `thessley-pam-win list` shows nothing for that name: enrol, and use the same account name |
+| The QR code appears on every login although `grace` was set | Not elevated when `grace` ran (it only printed a hint), or the login comes from another address than the approval. `service.log` shows `pass granted` / `pass used`; `thessley-pam-win passes` lists live passes |
 | The phone cannot reach the computer | The network is "Public" in Windows (the rule is Private only), or the phone is on mobile data, or a third-party firewall blocks 47810-47819 |
 | "Phone clock is off by more than a minute" | Fix the time on the phone or on this computer |
 | The login ends right after the password with no QR code | `gate.cmd` failed to start: check the path in `ForceCommand`, and that Python is where `gate.cmd` says |
@@ -168,11 +178,15 @@ clear yes.
   `gate.cmd` can be changed, and the admin tool is closed to them.
 - The running service refuses an account that is not enrolled, and rejects garbage, a bad address and a path-trick user name.
 - After `sshd` was restarted with the `Match User` block, a password login for that account from another computer on the
-  LAN was accepted, and the account's owner said it "seems to work". The QR code, the link and the approval were not
-  confirmed in `service.log` (administrators only); that line was not inspected.
+  LAN was accepted, the QR code and link were shown, and `service.log` recorded `approved by '<phone>' ... for <user>`.
+  The approval came from the phone, over the pinned-certificate listener, not from the ssh client.
+- **Passes** work with a real `sshd`. After `grace --hours 4`, the first approval wrote `pass granted to <user> (from
+  <address>, 4 h)`, and the next login from the same address went straight in, with no QR code: `pass used for <user>
+  (from <address>, 3 h 59 min left)`.
 
-**Still not tested:** the service's run-as-SYSTEM status was inferred, not read; `sftp`/`scp` and `ssh host command`
-through the gate; two approvers at once; passes with a real `sshd`; and the real phone app against this server.
+**Still not tested:** the service's run-as-SYSTEM status was inferred (it writes a log normal users cannot read), not
+read from the task; `sftp`/`scp` and `ssh host command` through the gate; two approvers at once; the desktop app as the
+approver; a pass from a different address (it should ask again); and a pass ending after its 4 h.
 Do those first on an account you can recover, with a second session open.
 
 ## Things that went wrong on the first install (and the fix)
