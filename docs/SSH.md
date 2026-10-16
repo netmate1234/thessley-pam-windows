@@ -236,6 +236,8 @@ The service writes `C:\ProgramData\ThessleyPamWin\service.log` (approvals, denia
 | The QR code appears on every login although `grace` was set | Not elevated when `grace` ran (it only printed a hint), or the login comes from another address than the approval. `service.log` shows `pass granted` / `pass used`; `thessley-pam-win passes` lists live passes |
 | `enroll` says "you can only add an approver for your own account" | You named another account without being an administrator; leave out `--user`, or use an administrator terminal |
 | `enroll` says every approver is switched off, or the first one needs an administrator | By design (lost phone, or `self-enroll off`): ask an administrator |
+| The desktop app says "This computer is not enrolled with ..." when you paste a link | You pasted the **first** link of an add-device enrolment ("Approve adding a device"). That one is answered by the phone or app that is **already** enrolled; the new device gets the second link, which appears after the approval |
+| Enrolling the desktop app with a TPM protection asks for administrator rights, or fails without a prompt | Fixed in thessley-passkey-linux `1a173d0`: enrolling as an approver for a computer needs no administrator rights (only a website's TPM proof does). Update the app |
 | `enroll` is denied or cannot start for a normal user | `thessley-pam-win.cmd` is not readable by Users: re-run `install.ps1` (see above) |
 | The phone cannot reach the computer | The network is "Public" in Windows (the rule is Private only), or the phone is on mobile data, or a third-party firewall blocks 47810-47819 |
 | "Phone clock is off by more than a minute" | Fix the time on the phone or on this computer |
@@ -269,9 +271,12 @@ clear yes.
   <address>, 4 h)`, and the next login from the same address went straight in, with no QR code: `pass used for <user>
   (from <address>, 3 h 59 min left)`.
 
-- **Enrolling without an administrator** is covered by tests against the real service and a stand-in phone (own account
-  only, first approver, approval by an existing approver, pass ignored, lost phone, switch off, closing the terminal, one at
-  a time, the command line as a normal user). It has not yet been tried with the real phone app on this computer.
+- **Enrolling without an administrator** works with real devices. A normal user (not an administrator) ran `enroll`; the
+  service asked for an approval to add a device, the phone approved it (`approved by '<phone>' ... (from -)`), and the
+  desktop app then enrolled as a second approver (`enrolled '<label>' <id> for <user> (by themselves)`). It is also covered
+  by tests against the real service and a stand-in phone (own account only, first approver, approval by an existing
+  approver, pass ignored, lost phone, switch off, closing the terminal, one at a time, the command line as a normal user).
+  The first-approver route (no approver yet) was only tested with the stand-in phone.
 
 - **Refusal without a signature** (the phone's "no" without a fingerprint) and the display-only link fields are covered by
   tests with a stand-in phone: an unsigned deny with the real nonce works; an unsigned approval, a wrong, missing or
