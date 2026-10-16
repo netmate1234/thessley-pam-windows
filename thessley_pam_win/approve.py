@@ -38,6 +38,19 @@ def _display_fields(service: str, rhost: str) -> dict:
     return out
 
 
+APPROVE_SERVICE = "thessley-enroll"  # what the apps are told an "adding a device" approval is (same name as thessley-pam-linux)
+
+
+def _link_fields(tty: str, rhost: str) -> dict:
+    """The display-only fields for the approval link: an ssh login says where it comes from; adding a device is named as such
+    (the desktop app also recognises tty "add-device")."""
+    if tty == "ssh":
+        return _display_fields("sshd", rhost)
+    if tty == "add-device":
+        return _display_fields(APPROVE_SERVICE, grants.LOCAL)
+    return {}
+
+
 @contextlib.contextmanager
 def _listening(ip: str, routes: dict, port: int = PORT):
     """A listener on `port`, or on the next free port when another login is still waiting for its approval.
@@ -142,7 +155,7 @@ def run(username: str, rhost: str, tty: str, say: Callable[[str], None], log: Ca
             link = f"thessleypam://{REQUEST_TYPE}?" + urlencode({
                 "h": ip, "p": lst.port, "fp": lst.fingerprint, "id": request_id, "n": nonce,
                 "m": mid, "hn": host, "u": username, "tty": tty,
-                **(_display_fields("sshd", rhost) if tty == "ssh" else {}),
+                **_link_fields(tty, rhost),
             })
             what = "adding a device for" if tty == "add-device" else "the ssh login for"
             say(f"Approve {what} {username} on {host} with Thessley Passkey (within {int(wait)} s):")

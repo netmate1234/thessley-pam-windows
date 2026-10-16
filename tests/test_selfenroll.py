@@ -2,6 +2,7 @@
 
 import json
 import socket
+from urllib.parse import parse_qs, urlsplit
 import tempfile
 import threading
 import time
@@ -141,10 +142,19 @@ class MoreApprovers(Base):
 
     def test_needs_an_approval_from_an_enrolled_approver(self):
         phone = EnrollingPhone(ME, "Second phone")
+        approval_links = []
+
+        def approve_it(link):
+            approval_links.append(link)
+            self.old.answer(link)
         lines, final = ipc(self.address, {"op": "enroll", "user": ME}, on_link=lambda l: phone.enroll(l),
-                           on_approval_link=lambda l: self.old.answer(l))
+                           on_approval_link=approve_it)
         self.assertTrue(final["ok"], lines)
         self.assertEqual(len(store.devices(ME)), 2)
+        # the apps are told what is being approved: same service name as thessley-pam-linux, no client address
+        q = {k: v[0] for k, v in parse_qs(urlsplit(approval_links[0]).query).items()}
+        self.assertEqual((q["s"], q["tty"]), ("thessley-enroll", "add-device"))
+        self.assertNotIn("r", q)
         self.assertIn("adding a device", " ".join(lines))
         self.assertEqual(phone.wait()[1]["result"], "ok")
 
