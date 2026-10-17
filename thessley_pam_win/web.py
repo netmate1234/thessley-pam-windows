@@ -592,6 +592,7 @@ nav a,.link{color:var(--accent);text-decoration:none;margin-right:14px}nav{margi
 input[type=text]{width:100%;padding:10px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);font-size:1rem}
 button{padding:9px 14px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--fg);font-size:.95rem;cursor:pointer}
 .btn{display:inline-block;padding:11px 18px;border-radius:8px;background:var(--accent);color:#fff;text-decoration:none;font-weight:600}
+.btn.small{padding:7px 12px;font-size:.9rem}
 button.primary{background:var(--accent);border-color:var(--accent);color:#fff}button.danger{color:var(--danger);border-color:var(--danger)}
 .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:8px}.row form{display:inline}
 .flash{border-left:4px solid var(--ok);padding:8px 12px;margin:10px 0;background:var(--card)}
@@ -614,9 +615,11 @@ def page(title: str, body: str, nonce: str, session: Session | None = None, admi
                + f'<form method="post" action="/logout" style="display:inline"><input type="hidden" name="csrf" value="{esc(session.csrf)}">'
                  '<button>Sign out</button></form></nav>')
     who = f'<span class="dim">Signed in as {esc(session.user)}</span>' if session else ""
+    # On every page: opens the Thessley Passkey app on the computer or phone this browser runs on (no request needed).
+    opener = '<a class="btn small" href="thessleypam://open">Open the Thessley app</a>'
     return (f'<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
             f'<title>{esc(title)} · Thessley keys</title><style>{CSS}</style></head><body><main>'
-            f'<header><h1>Thessley keys</h1>{who}</header>{nav}{body}</main></body></html>')
+            f'<header><h1>Thessley keys</h1><span style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">{who}{opener}</span></header>{nav}{body}</main></body></html>')
 
 
 def flash_html(text: str) -> str:
@@ -650,7 +653,7 @@ async function tick() {
       live.replaceChildren();
       if (s.link) {
         if (s.link.startsWith('thessleypam://')) {
-          const open = el('a', 'Open in the Thessley Passkey app', 'btn'); open.href = s.link;
+          const open = el('a', 'Open this request in the Thessley app', 'btn'); open.href = s.link;
           live.append(open, el('p', 'On a computer or phone that has the app, this opens it with this request ready.', 'dim'));
         }
         const img = el('img', '', 'qr'); img.alt = 'QR code'; img.src = '/qr/' + id + '.svg';

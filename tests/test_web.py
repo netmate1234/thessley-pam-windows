@@ -234,11 +234,22 @@ class WebTest(WebBase):
         """The browser's own app can be opened with the request: a thessleypam:// button next to the QR code and the text link."""
         fid = self.start_flow(self.b, "/login", {"user": USER})
         _, page = self.b.get(f"/wait/{fid}")
-        self.assertIn("Open in the Thessley Passkey app", page)
+        self.assertIn("Open this request in the Thessley app", page)
         self.assertIn("startsWith('thessleypam://')", page)       # only ever a link of this kind becomes the button
         self.assertIn(".btn{", page)                                # and it is styled as a button
         status = self.wait_for(self.b, fid, lambda s: s.get("link"))
         self.assertTrue(status["link"].startswith("thessleypam://"))
+
+    def test_every_page_has_an_open_the_app_button(self):
+        """A button that opens the Thessley app on whatever this browser runs on, even where there is no request to answer."""
+        for path in ("/", "/nowhere"):
+            _, body = self.b.get(path)
+            self.assertIn('href="thessleypam://open"', body, path)
+            self.assertIn("Open the Thessley app", body, path)
+        self.login()
+        for path in ("/keys", "/log", "/admin"):
+            _, body = self.b.get(path)
+            self.assertIn('href="thessleypam://open"', body, path)
 
     def test_every_page_has_the_security_headers(self):
         resp, _ = self.b.get("/")
