@@ -1019,6 +1019,14 @@ def make_handler(app: WebApp):
 
 class Server(ThreadingHTTPServer):
     daemon_threads = True
+    # Windows differs from Linux here: with SO_REUSEADDR (the default) another program can bind the very port this page
+    # serves, and share or take over its connections. Bind exclusively, as listener.py does.
+    allow_reuse_address = False
+
+    def server_bind(self):
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
 
     def handle_error(self, request, client_address):  # a browser that hangs up mid-request is not an error here
         pass
