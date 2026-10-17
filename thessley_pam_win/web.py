@@ -591,6 +591,7 @@ nav a,.link{color:var(--accent);text-decoration:none;margin-right:14px}nav{margi
 .dim{color:var(--dim);font-size:.9rem}.ok{color:var(--ok)}.bad{color:var(--danger)}
 input[type=text]{width:100%;padding:10px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);font-size:1rem}
 button{padding:9px 14px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--fg);font-size:.95rem;cursor:pointer}
+.btn{display:inline-block;padding:11px 18px;border-radius:8px;background:var(--accent);color:#fff;text-decoration:none;font-weight:600}
 button.primary{background:var(--accent);border-color:var(--accent);color:#fff}button.danger{color:var(--danger);border-color:var(--danger)}
 .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:8px}.row form{display:inline}
 .flash{border-left:4px solid var(--ok);padding:8px 12px;margin:10px 0;background:var(--card)}
@@ -648,6 +649,10 @@ async function tick() {
       last = key;
       live.replaceChildren();
       if (s.link) {
+        if (s.link.startsWith('thessleypam://')) {
+          const open = el('a', 'Open in the Thessley Passkey app', 'btn'); open.href = s.link;
+          live.append(open, el('p', 'On a computer or phone that has the app, this opens it with this request ready.', 'dim'));
+        }
         const img = el('img', '', 'qr'); img.alt = 'QR code'; img.src = '/qr/' + id + '.svg';
         live.append(img, el('p', 'Or open this link in the Thessley Passkey app (paste it, or run thessley-passkey respond):', 'dim'), el('p', s.link, 'mono'));
       } else if (!s.message) {

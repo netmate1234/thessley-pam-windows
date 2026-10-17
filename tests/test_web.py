@@ -230,6 +230,16 @@ class WebTest(WebBase):
         statuses = [self.b.post("/login", {"user": "no-such-user-x"})[0].status for _ in range(web.LOGIN_RATE[0] + 2)]
         self.assertIn(429, statuses)
 
+    def test_the_wait_page_offers_an_open_in_the_app_button(self):
+        """The browser's own app can be opened with the request: a thessleypam:// button next to the QR code and the text link."""
+        fid = self.start_flow(self.b, "/login", {"user": USER})
+        _, page = self.b.get(f"/wait/{fid}")
+        self.assertIn("Open in the Thessley Passkey app", page)
+        self.assertIn("startsWith('thessleypam://')", page)       # only ever a link of this kind becomes the button
+        self.assertIn(".btn{", page)                                # and it is styled as a button
+        status = self.wait_for(self.b, fid, lambda s: s.get("link"))
+        self.assertTrue(status["link"].startswith("thessleypam://"))
+
     def test_every_page_has_the_security_headers(self):
         resp, _ = self.b.get("/")
         self.assertIn("default-src 'none'", resp.getheader("Content-Security-Policy"))
