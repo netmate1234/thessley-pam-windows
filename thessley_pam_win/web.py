@@ -80,7 +80,7 @@ def admin_names() -> set[str]:
         out = subprocess.run(
             ["powershell", "-NoProfile", "-NonInteractive", "-Command",
              "Get-LocalGroupMember -SID S-1-5-32-544 | ForEach-Object { $_.Name }"],
-            capture_output=True, text=True, timeout=20).stdout
+            capture_output=True, text=True, errors="replace", timeout=20).stdout
         for line in out.splitlines():
             try:
                 names.add(store.normalize_user(line))

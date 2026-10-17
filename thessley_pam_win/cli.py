@@ -199,7 +199,9 @@ WEB_TASK = "ThessleyPamWinWeb"
 
 
 def _task(*args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["schtasks", *args], capture_output=True, text=True, check=False)
+    # schtasks answers in the console's code page (on a French Windows with accents); only the exit code matters here, so a
+    # byte that is not valid UTF-8 must not raise
+    return subprocess.run(["schtasks", *args], capture_output=True, text=True, errors="replace", check=False)
 
 
 def cmd_web(args) -> int:
