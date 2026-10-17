@@ -362,6 +362,42 @@ class WebTest(WebBase):
         self.assertIn(f"<h1>Thessley Passkeys for {host}</h1>", page)
         self.assertIn(f"Thessley Passkeys for {host}</title>", page)
 
+    # -- passes
+    def pass_for(self, user, rhost="192.168.1.50", hours=4):
+        cred = store.devices(user)[0]["credential_id"]
+        return grants.add(user, rhost, hours, cred)
+
+    def test_the_keys_page_lists_the_passes_and_each_can_be_ended(self):
+        self.pass_for(USER)
+        self.pass_for(USER, "192.168.1.51")
+        self.login()
+        _, body = self.b.get("/keys")
+        self.assertIn("<h2>Passes</h2>", body)
+        self.assertIn("192.168.1.50", body)
+        self.assertIn("approved by My phone", body)
+        resp, _ = self.b.post("/passes/end", {"csrf": self.csrf(), "user": USER, "rhost": "192.168.1.50"})
+        self.assertEqual(resp.status, 303)    # no fresh approval is asked: ending a pass only takes access away
+        self.assertEqual([p["rhost"] for p in grants.passes_of(USER)], ["192.168.1.51"])
+        self.assertIn("Ended 1 pass", self.b.get("/keys")[1])
+
+    def test_all_passes_can_be_ended_at_once_and_the_page_says_so_when_there_are_none(self):
+        self.pass_for(USER)
+        self.pass_for(USER, "192.168.1.51")
+        self.login()
+        self.b.post("/passes/end", {"csrf": self.csrf(), "user": USER, "all": "1"})
+        self.assertEqual(grants.passes_of(USER), [])
+        self.assertIn("No pass is active", self.b.get("/keys")[1])
+
+    def test_ending_a_pass_needs_the_session_and_the_csrf_token_and_only_your_own_account(self):
+        self.pass_for(USER)
+        self.assertEqual(self.b.post("/passes/end", {"user": USER, "all": "1"})[0].status, 303)   # not signed in
+        self.assertEqual(len(grants.passes_of(USER)), 1)
+        self.login()
+        self.b.post("/passes/end", {"csrf": "wrong", "user": USER, "all": "1"})
+        self.assertEqual(len(grants.passes_of(USER)), 1)
+        store.add_device(OTHER, FakePhone(OTHER).public_key, "Bob's", [])
+        self.assertEqual(self.b.post("/passes/end", {"csrf": self.csrf(), "user": OTHER, "all": "1"})[0].status, 403)
+
     # -- who may do what
     def test_a_normal_user_sees_only_their_own_keys_and_no_admin_page(self):
         store.add_device(OTHER, FakePhone(OTHER).public_key, "Bob's", [])

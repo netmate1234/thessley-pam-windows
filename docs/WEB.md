@@ -57,6 +57,9 @@ address: `thessley-pam-win web listen auto`. Every page says which computer it i
   browser session can look but not change anything. A sign-in or a change never uses a pass and never grants one.
 - **Administrators** (members of the local Administrators group) can pick any account and change the two settings
   (how long one approval counts, whether users may enrol their own first approver). Their own phone approves each change.
+- **Passes:** under your approvers, the ssh approvals that currently let your account in without asking your device again
+  (the grace hours), each with an **End this pass** button, and **End all passes**. The next login then asks your device again.
+  Ending a pass only takes access away, so it needs no fresh approval.
 - **Activity:** the recent approvals, refusals, passes and enrolments from `service.log` (administrators can see everyone's).
 
 ## TPM proof

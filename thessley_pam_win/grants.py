@@ -198,6 +198,21 @@ def all_passes(now: float | None = None) -> list[dict]:
     return out
 
 
+def passes_of(username: str, now: float | None = None) -> list[dict]:
+    """The live passes of one account."""
+    now = time.time() if now is None else now
+    return _live(_load(username), now)
+
+
+def revoke_one(username: str, rhost: str) -> int:
+    """End the one pass for this user and client address. Returns how many ended (0 or 1)."""
+    items = _load(username)
+    keep = [i for i in items if i.get("rhost") != rhost]
+    if len(keep) != len(items):
+        _save(username, keep)
+    return len(items) - len(keep)
+
+
 def revoke(username: str | None = None) -> int:
     """End passes (all of a user's, or everyone's). Returns how many ended."""
     ended = 0

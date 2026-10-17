@@ -728,7 +728,29 @@ def keys_page(user: str, viewer: Session, flash: str, admin: bool, users: list[s
     add = (f'<form method="post" action="/keys/add"><input type="hidden" name="csrf" value="{esc(viewer.csrf)}">'
            f'<input type="hidden" name="user" value="{esc(user)}"><div class="row"><button class="primary">Add a device</button></div></form>')
     note = ('<p class="dim">Changes ask your device for a fresh approval first, so nobody who only has this browser can change them.</p>')
-    return flash_html(flash) + f"<h2>Keys for {esc(user)}</h2>{who}{note}{''.join(rows)}{add}"
+    return flash_html(flash) + f"<h2>Keys for {esc(user)}</h2>{who}{note}{''.join(rows)}{add}{passes_html(user, viewer, devices)}"
+
+
+def passes_html(user: str, viewer: Session, devices: list[dict]) -> str:
+    """The approvals that let this account in over ssh without asking its device again (the 4 h passes), each with a button
+    that ends it. Ending a pass only takes access away, so it needs no fresh approval; the next login asks the device again."""
+    labels = {d["credential_id"]: d.get("label", "") for d in devices}
+    hidden = f'<input type="hidden" name="csrf" value="{esc(viewer.csrf)}"><input type="hidden" name="user" value="{esc(user)}">'
+    rows = []
+    for p in grants.passes_of(user):
+        by = labels.get(p.get("credential", ""), "") or "a removed device"
+        rows.append(
+            f'<div class="card"><strong>ssh login</strong> from {esc(p.get("rhost", ""))} '
+            f'<span class="dim">· approved by {esc(by)} · {esc(grants.remaining(p))} left</span>'
+            f'<form method="post" action="/passes/end" class="row">{hidden}'
+            f'<input type="hidden" name="rhost" value="{esc(p.get("rhost", ""))}"><button class="danger">End this pass</button></form></div>')
+    if not rows:
+        body = '<div class="card dim">No pass is active: every login asks your device.</div>'
+    else:
+        body = "".join(rows) + (f'<form method="post" action="/passes/end" class="row">{hidden}'
+                                '<input type="hidden" name="all" value="1"><button class="danger">End all passes</button></form>')
+    return ("<h2>Passes</h2><p class='dim'>After one approval, the same account from the same address is let in without asking "
+            "your device again, for a few hours. End a pass to make the next login ask again.</p>" + body)
 
 
 def key_details_html(rows: list[tuple[str, str]]) -> str:
@@ -956,6 +978,8 @@ def make_handler(app: WebApp):
                 return self.redirect(f"/enroll/{f.id}")
             if route.startswith("/keys/"):
                 return self.keys_action(route[len("/keys/"):], data, s)
+            if route == "/passes/end":
+                return self.passes_end(data, s)
             if route == "/admin/set":
                 if not is_admin(s.user):
                     return self.html(403, "Not allowed", flash_html("Only administrators can change settings."), s)
@@ -990,6 +1014,23 @@ def make_handler(app: WebApp):
             if action == "remove":
                 return self.start_change(s, f"removing {label} from {target}", app.change_remove(target, cred))
             return self.html(404, "Not found", flash_html("There is nothing here."), s)
+
+        def passes_end(self, data: dict, s: Session) -> None:
+            """End one pass, or all of an account's. Only takes access away, so no fresh approval is asked."""
+            target = app.target(s, data.get("user"))
+            if target is None:
+                return self.html(403, "Not allowed", flash_html("You can only end your own passes."), s)
+            if data.get("all"):
+                ended = grants.revoke(username=target)
+            else:
+                rhost = str(data.get("rhost", ""))
+                if not rhost or len(rhost) > 64:
+                    return self.html(400, "Not valid", flash_html("No such pass."), s)
+                ended = grants.revoke_one(target, rhost)
+            app.log(f"web page: {s.user} ended {ended} pass(es) of {target}", False)
+            s.flash = (f"Ended {ended} pass{'es' if ended != 1 else ''}. The next login asks your device again." if ended
+                       else "That pass had already ended.")
+            return self.redirect("/keys" if target == s.user else f"/keys?user={target}")
 
         def admin_action(self, data: dict, s: Session) -> None:
             name, value = data.get("name", ""), (data.get("value") or "").strip()
