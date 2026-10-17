@@ -97,7 +97,7 @@ def run(username: str, rhost: str, tty: str, say: Callable[[str], None], log: Ca
         say("Thessley Passkey: this account name is not supported. Refusing.")
         return False
     if not devices:
-        say("Thessley Passkey: no phone or app is enrolled for this account, so this login is refused.")
+        say("Thessley Passkey: no device is enrolled for this account, so this login is refused.")
         log(f"no approver for {username}; refused", True)
         return False
 
@@ -134,11 +134,11 @@ def run(username: str, rhost: str, tty: str, say: Callable[[str], None], log: Ca
             return 400, {"result": "error", "message": "Missing fields."}
         device = by_id.get(cred)
         if device is None:
-            return 403, {"result": "error", "message": "This phone is not enrolled for this user here."}
+            return 403, {"result": "error", "message": "This device is not enrolled for this user here."}
         if action not in ("approve", "deny"):
             return 400, {"result": "error", "message": "Unknown action."}
         if not protocol.timestamp_ok(timestamp):
-            return 400, {"result": "error", "message": "Phone clock is off by more than a minute."}
+            return 400, {"result": "error", "message": "Device clock is off by more than a minute."}
         unsigned = not signature
         if unsigned:
             # compared as bytes: a non-ASCII value must be a plain mismatch, not an error
@@ -182,7 +182,7 @@ def run(username: str, rhost: str, tty: str, say: Callable[[str], None], log: Ca
                 if cancel is not None and cancel.is_set():
                     log(f"login of {username} dropped before an answer", False)
                     return False
-            time.sleep(0.5)  # let the phone receive its reply before the listener closes
+            time.sleep(0.5)  # let the device receive its reply before the listener closes
     except OSError as e:
         say(f"Thessley Passkey: could not start ({e.strerror or e}). Refusing.")
         log(f"listener failed for {username}: {e}", True)

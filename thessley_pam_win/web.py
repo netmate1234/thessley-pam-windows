@@ -57,6 +57,9 @@ SESSION_MAX_SECONDS = 8 * 3600
 FLOW_KEEP_SECONDS = 15 * 60
 LOGIN_RATE = (8, 300)  # at most 8 sign-in requests per client address in 300 s
 MAX_FLOWS = 40
+WEB_WAIT = 180          # seconds to approve a sign-in or a change (a person at a browser, the device in a pocket)
+WEB_CONFIRM_WAIT = 180  # seconds to compare the codes and press the button when adding a device
+WEB_ENROLL_WAIT = 300   # seconds the new device has to scan the code
 
 
 def now() -> float:
@@ -130,7 +133,7 @@ class Flow:
             m = re.search(r"Code:\s+(\d{3} \d{3})", line)
             if m:
                 self.code = m.group(1)
-            m = re.match(r"Phone '(.*)' \(", line)
+            m = re.match(r"(?:(?:Device|Phone) )?'(.*)' \(", line)
             if m:
                 self.label = m.group(1)
 
@@ -213,7 +216,8 @@ class WebApp:
         flow.state = "waiting"
         try:
             # never a pass, and none granted: a web sign-in or a change must be approved afresh each time
-            ok = approve.run(flow.user, ip, tty, flow.say, self.log, port=approve.PORT, use_pass=False, grant_pass=False)
+            ok = approve.run(flow.user, ip, tty, flow.say, self.log, port=approve.PORT, use_pass=False, grant_pass=False,
+                             wait=WEB_WAIT)
         except Exception as exc:  # strict: any trouble is a refusal
             flow.say(f"error: {exc!r}")
             ok = False
@@ -237,7 +241,7 @@ class WebApp:
         return flow
 
     def start_change(self, session: Session, ip: str, description: str, action, tty: str = TTY_CHANGE) -> Flow | None:
-        """A fresh approval by the signed-in account's phone, then `action()` runs once (it returns (url, message))."""
+        """A fresh approval by the signed-in account's device, then `action()` runs once (it returns (url, message))."""
         if not self.usable(session.user):
             return None
         flow = self._new_flow(Flow("change", session.user, description, on_approved=action, owner=session.user))
@@ -246,7 +250,7 @@ class WebApp:
         return flow
 
     def start_enroll(self, user: str, owner: str | None = None) -> Flow | None:
-        flow = self._new_flow(Flow("enroll", user, "Add a phone or app", owner=owner))
+        flow = self._new_flow(Flow("enroll", user, "Add a device", owner=owner))
         if flow is None:
             return None
 
@@ -257,12 +261,22 @@ class WebApp:
 
         def work():
             flow.state = "waiting"
+            device = None
             try:
-                device = enroll.run(user, flow.say, ask_yes, port=approve.PORT, cancel=flow.cancel, show_link=True)
+                device = enroll.run(user, flow.say, ask_yes, port=approve.PORT, cancel=flow.cancel, show_link=True,
+                                    wait=WEB_ENROLL_WAIT, confirm_wait=WEB_CONFIRM_WAIT)
             except Exception as exc:
                 flow.say(f"error: {exc!r}")
-                device = None
+            if not device:  # whatever went wrong, a device that was stored during this flow counts as added
+                stored = [d for d in store.devices(user) if flow.label and d.get("label") == flow.label
+                          and (d.get("enrolled_at") or 0) >= int(flow.created)]
+                if stored:
+                    device = stored[-1]
+                    flow.label = flow.label or str(device.get("label", ""))
             flow.state = "done" if device else "failed"
+            notes = " | ".join(line.strip() for line in flow.lines if line.strip())[-300:]
+            self.log(f"web page: adding a device for {user} (asked by {flow.owner}): {flow.state}"
+                     + (f" ({device.get('credential_id', '')})" if device else "") + f" [{notes}]", False)
 
         threading.Thread(target=work, daemon=True).start()
         return flow
@@ -615,11 +629,12 @@ def page(title: str, body: str, nonce: str, session: Session | None = None, admi
                + f'<form method="post" action="/logout" style="display:inline"><input type="hidden" name="csrf" value="{esc(session.csrf)}">'
                  '<button>Sign out</button></form></nav>')
     who = f'<span class="dim">Signed in as {esc(session.user)}</span>' if session else ""
-    # On every page: opens the Thessley Passkey app on the computer or phone this browser runs on (no request needed).
+    # On every page: opens the Thessley Passkey app on the computer or device this browser runs on (no request needed).
     opener = '<a class="btn small" href="thessleypam://open">Open the Thessley app</a>'
+    host = machine.hostname()  # which computer these keys are for (the address in the browser may be a tunnel's)
     return (f'<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
-            f'<title>{esc(title)} · Thessley keys</title><style>{CSS}</style></head><body><main>'
-            f'<header><h1>Thessley keys</h1><span style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">{who}{opener}</span></header>{nav}{body}</main></body></html>')
+            f'<title>{esc(title)} · Thessley Passkeys for {esc(host)}</title><style>{CSS}</style></head><body><main>'
+            f'<header><h1>Thessley Passkeys for {esc(host)}</h1><span style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">{who}{opener}</span></header>{nav}{body}</main></body></html>')
 
 
 def flash_html(text: str) -> str:
@@ -628,7 +643,7 @@ def flash_html(text: str) -> str:
 
 def login_page(message: str = "") -> str:
     return (flash_html(message) + '<div class="card"><h2 style="margin-top:0">Sign in</h2>'
-            '<p class="dim">Type your account name on this computer. You will approve the sign-in on your phone or in the '
+            '<p class="dim">Type your account name on this computer. You will approve the sign-in on your device or in the '
             'Thessley Passkey app, with a QR code or a link. No password.</p>'
             '<form method="post" action="/login"><label for="user" class="dim">Account name</label>'
             '<input type="text" id="user" name="user" autocomplete="username" autocapitalize="none" spellcheck="false" autofocus>'
@@ -654,7 +669,7 @@ async function tick() {
       if (s.link) {
         if (s.link.startsWith('thessleypam://')) {
           const open = el('a', 'Open this request in the Thessley app', 'btn'); open.href = s.link;
-          live.append(open, el('p', 'On a computer or phone that has the app, this opens it with this request ready.', 'dim'));
+          live.append(open, el('p', 'On a computer or device that has the app, this opens it with this request ready.', 'dim'));
         }
         const img = el('img', '', 'qr'); img.alt = 'QR code'; img.src = '/qr/' + id + '.svg';
         live.append(img, el('p', 'Or open this link in the Thessley Passkey app (paste it, or run thessley-passkey respond):', 'dim'), el('p', s.link, 'mono'));
@@ -662,7 +677,7 @@ async function tick() {
         live.append(el('p', 'Getting the request ready…', 'dim'));
       }
       if (s.state === 'confirm') {
-        live.append(el('p', 'Compare this code with the one on the new phone:'), el('div', s.code, 'big'));
+        live.append(el('p', 'Compare this code with the one on the new device:'), el('div', s.code, 'big'));
         const f = document.createElement('form'); f.method = 'post'; f.action = '/enroll/' + id + '/confirm';
         const h = document.createElement('input'); h.type = 'hidden'; h.name = 'csrf'; h.value = s.csrf; f.append(h);
         const row = el('div', '', 'row');
@@ -711,8 +726,8 @@ def keys_page(user: str, viewer: Session, flash: str, admin: bool, users: list[s
         who = (f'<form method="get" action="/keys" class="row"><label class="dim">Account</label>'
                f'<select name="user" style="padding:8px">{opts}</select><button>Show</button></form>')
     add = (f'<form method="post" action="/keys/add"><input type="hidden" name="csrf" value="{esc(viewer.csrf)}">'
-           f'<input type="hidden" name="user" value="{esc(user)}"><div class="row"><button class="primary">Add a phone or app</button></div></form>')
-    note = ('<p class="dim">Changes ask your phone for a fresh approval first, so nobody who only has this browser can change them.</p>')
+           f'<input type="hidden" name="user" value="{esc(user)}"><div class="row"><button class="primary">Add a device</button></div></form>')
+    note = ('<p class="dim">Changes ask your device for a fresh approval first, so nobody who only has this browser can change them.</p>')
     return flash_html(flash) + f"<h2>Keys for {esc(user)}</h2>{who}{note}{''.join(rows)}{add}"
 
 
@@ -743,7 +758,7 @@ def admin_page(viewer: Session, flash: str) -> str:
               f'<form method="post" action="/admin/set" class="row">{hidden}<input type="hidden" name="name" value="self_enroll">'
               f'<button name="value" value="{"off" if first else "on"}">Switch {"off" if first else "on"}</button></form></div>')
     return (flash_html(flash) + "<h2>Settings for this computer</h2>"
-            "<p class='dim'>Only administrators see this page. Every change asks your phone for a fresh approval.</p>"
+            "<p class='dim'>Only administrators see this page. Every change asks your device for a fresh approval.</p>"
             + grace + toggle + f"<p class='dim'>Passes held right now: {esc(len(grants.all_passes()))}.</p>")
 
 
@@ -857,8 +872,8 @@ def make_handler(app: WebApp):
                 if f is None:
                     return self.html(404, "Not found", flash_html("That request is no longer here. Start again."), s)
                 heading = "Approve the sign-in" if f.kind == "login" else f"Approve: {f.description}"
-                note = ("Scan the code with the Thessley Passkey app, or open the link. You have 90 seconds." if f.kind != "enroll"
-                        else "Scan the code with the new phone's Thessley Passkey app, or open the link on the new app.")
+                note = (f"Scan the code with the Thessley Passkey app, or open the link. You have {WEB_WAIT // 60} minutes." if f.kind != "enroll"
+                        else "Scan the code with the new device's Thessley Passkey app, or open the link on the new app.")
                 return self.html(200, heading, wait_page(f, "{NONCE}", s, heading, note), s)
             m = re.fullmatch(r"/status/([0-9a-f]{32})", route)
             if m:
@@ -880,8 +895,8 @@ def make_handler(app: WebApp):
                 f = self.flow_for(m.group(1), s)
                 if f is None or f.kind != "enroll":
                     return self.html(404, "Not found", flash_html("That request is no longer here."), s)
-                return self.html(200, "Add a phone or app", wait_page(f, "{NONCE}", s, "Add a phone or app",
-                                 "Scan the code with the new phone's Thessley Passkey app, or open the link on the new app."), s)
+                return self.html(200, "Add a device", wait_page(f, "{NONCE}", s, "Add a device",
+                                 "Scan the code with the new device's Thessley Passkey app, or open the link on the new app."), s)
             if route == "/keys":
                 s = self.need_session()
                 if s is None:
@@ -959,7 +974,7 @@ def make_handler(app: WebApp):
             if target is None:
                 return self.html(403, "Not allowed", flash_html("You can only change your own keys."), s)
             if action == "add":
-                return self.start_change(s, f"adding a phone or app for {target}", app.change_begin_enroll(target, s.user), TTY_DEVICE)
+                return self.start_change(s, f"adding a device for {target}", app.change_begin_enroll(target, s.user), TTY_DEVICE)
             known = {d["credential_id"]: d for d in store.devices(target)}
             if not CRED_RE.match(cred) or cred not in known:
                 return self.html(404, "Not found", flash_html("No such key."), s)
@@ -992,6 +1007,20 @@ def make_handler(app: WebApp):
                 return self.html(404, "Not found", flash_html("No such setting."), s)
             self.start_change(s, f"changing a setting ({name})", app.change_setting(name, value))
 
+        @staticmethod
+        def failure_text(f: Flow) -> str:
+            """Why an enrolment ended without a new device, in words that say which of the cases it was."""
+            text = "\n".join(f.lines)
+            if "Timed out" in text:
+                return f"No device answered in {WEB_ENROLL_WAIT // 60} minutes, so nothing was added. Start again and scan the code in time."
+            if "Cancelled" in text:
+                return "This was cancelled, so nothing was added."
+            if "Not added" in text:
+                return "The codes were not confirmed in time or did not match, so nothing was added."
+            if "error:" in text:
+                return "Something went wrong on this computer, so nothing was added. Check the device list before trying again."
+            return "The new device was not added."
+
         def status(self, fid: str, s: Session | None) -> None:
             f = self.flow_for(fid, s)
             if f is None:
@@ -1015,10 +1044,10 @@ def make_handler(app: WebApp):
             elif f.state == "timeout":
                 out.update(message="No answer in time. Nothing was changed.", bad=True)
             elif f.state == "failed":
-                out.update(message="The new phone was not added.", bad=True)
+                out.update(message=self.failure_text(f), bad=True)
             elif f.state == "done" and f.kind == "enroll":
                 if s is not None:
-                    s.flash = f"Added {f.label or 'the new phone'}."
+                    s.flash = f"Added {f.label or 'the new device'}."
                 out.update(next="/keys" if s is None or f.user == s.user else f"/keys?user={f.user}")
             self.json(out, extra)
 

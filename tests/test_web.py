@@ -75,6 +75,8 @@ class WebBase(unittest.TestCase):
         machine.lan_ip = lambda: "127.0.0.1"
         machine.machine_id = lambda: "ab" * 16   # the real one reads the Windows registry
         approve.WAIT = 6
+        self._web_waits = (web.WEB_WAIT, web.WEB_CONFIRM_WAIT, web.WEB_ENROLL_WAIT)
+        web.WEB_WAIT, web.WEB_CONFIRM_WAIT, web.WEB_ENROLL_WAIT = 6, 30, 30   # the page's longer waits, shortened
         WebBase.next_port += 10                    # a port range of its own per test: closed ports can linger on this system
         approve.PORT = WebBase.next_port
         self.admin = False
@@ -94,6 +96,7 @@ class WebBase(unittest.TestCase):
 
     def _restore(self):
         store.BASE, machine.lan_ip, machine.machine_id, approve.WAIT, web.is_admin, approve.PORT = self._saved
+        web.WEB_WAIT, web.WEB_CONFIRM_WAIT, web.WEB_ENROLL_WAIT = self._web_waits
 
     # -- helpers
     def wait_for(self, browser, flow_id, want, timeout=15):
@@ -342,6 +345,22 @@ class WebTest(WebBase):
         self.b.post(f"/enroll/{flow.id}/confirm", {"csrf": self.csrf(), "answer": "no"})
         self.wait_for(self.b, flow.id, lambda s: s["state"] == "failed")
         self.assertEqual(len(store.devices(USER)), 1)
+
+    def test_each_way_of_not_adding_a_device_says_which_it_was(self):
+        for lines, expected in ((["Timed out. Nothing was added."], "No device answered"),
+                                (["Not added."], "not confirmed in time or did not match"),
+                                (["Cancelled. Nothing was added."], "cancelled"),
+                                (["error: OSError()"], "Something went wrong"),
+                                ([], "was not added")):
+            f = web.Flow("enroll", USER)
+            f.lines = lines
+            self.assertIn(expected, web.make_handler(self.app).failure_text(f))
+
+    def test_every_page_says_which_computer_it_is_for(self):
+        host = machine.hostname()
+        page = web.page("Sign in", "", "n")
+        self.assertIn(f"<h1>Thessley Passkeys for {host}</h1>", page)
+        self.assertIn(f"Thessley Passkeys for {host}</title>", page)
 
     # -- who may do what
     def test_a_normal_user_sees_only_their_own_keys_and_no_admin_page(self):

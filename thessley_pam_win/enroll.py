@@ -108,14 +108,14 @@ def run(username: str, say: Callable[[str], None], ask_yes: Callable[[str, int],
             public_key = str(body["public_key"])
             signature = str(body["proof_signature"])
             timestamp = int(body["timestamp"])
-            label = str(body.get("label") or "Phone").strip()
+            label = str(body.get("label") or "Device").strip()
             chain = [str(c) for c in body.get("attestation_chain") or []][:10]
         except (KeyError, TypeError, ValueError):
             return 400, {"result": "error", "message": "Missing fields."}
         if not LABEL.match(label):
-            label = "Phone"
+            label = "Device"
         if not protocol.timestamp_ok(timestamp):
-            return 400, {"result": "error", "message": "Phone clock is off by more than a minute."}
+            return 400, {"result": "error", "message": "Device clock is off by more than a minute."}
         msg = protocol.canonical("enroll", request_id, mid, username, nonce, timestamp, "register")
         if not protocol.verify(public_key, signature, msg):
             return 400, {"result": "error", "message": "Signature did not verify."}
@@ -126,6 +126,8 @@ def run(username: str, say: Callable[[str], None], ask_yes: Callable[[str, int],
         pending.put({"client_ip": client_ip, "public_key": public_key, "label": label, "chain": chain,
                      "attestation": attestation})
         if not decided.wait(confirm_wait + 10) or not decision.get("ok"):
+            if decision.get("error"):
+                return 500, {"result": "error", "message": "The computer could not save this device: " + decision["error"]}
             return 200, {"result": "denied", "message": "Not confirmed on the computer."}
         return 200, {"result": "ok", "credential_id": decision["credential_id"], "username": username, "hostname": host,
                      "attestation": "tpm" if (attestation or {}).get("level") == "tpm" else ""}
@@ -138,7 +140,7 @@ def run(username: str, say: Callable[[str], None], ask_yes: Callable[[str, int],
             "h": ip, "p": lst.port, "fp": lst.fingerprint, "id": request_id, "n": nonce,
             "m": mid, "hn": host, "u": username,
         })
-        say(f"Add a phone or app that may approve ssh logins for '{username}' on {host}.")
+        say(f"Add a device that may approve ssh logins for '{username}' on {host}.")
         if show_link:
             say(f"Link: {link}")  # for the Thessley Passkey desktop app, which cannot scan a code
         for line in qr.lines(link, border=qr_border):
@@ -155,7 +157,7 @@ def run(username: str, say: Callable[[str], None], ask_yes: Callable[[str, int],
                 if cancel is not None and cancel.is_set():
                     break
         if item is None:
-            say("Timed out or cancelled. Nothing was added.")
+            say("Cancelled. Nothing was added." if cancel is not None and cancel.is_set() else "Timed out. Nothing was added.")
             return None
 
         code = protocol.pairing_code(item["public_key"])
@@ -165,10 +167,15 @@ def run(username: str, say: Callable[[str], None], ask_yes: Callable[[str, int],
         if att:
             say("    TPM:   " + (f"verified, a genuine TPM 2.0 chip ({(att['maker'] + ' ' + att['model']).strip() or 'maker not named'})"
                                  if att["level"] == "tpm" else f"claimed but NOT verified ({att['reason']})"))
-        if ask_yes("Does it show the same code? Type yes to add it: ", int(confirm_wait)):
-            device = store.add_device(username, item["public_key"], item["label"], item["chain"], item.get("attestation"))
-            decision.update(ok=True, credential_id=device["credential_id"])
-        decided.set()
-        time.sleep(1.5)  # let the answer reach the phone before the listener shuts down
+        try:
+            if ask_yes("Does it show the same code? Type yes to add it: ", int(confirm_wait)):
+                device = store.add_device(username, item["public_key"], item["label"], item["chain"], item.get("attestation"))
+                decision.update(ok=True, credential_id=device["credential_id"])
+        except OSError as exc:
+            decision["error"] = str(exc)
+            say(f"Could not save the device: {exc}")
+        finally:
+            decided.set()  # always answer the device, or it waits for the full timeout
+        time.sleep(1.5)  # let the answer reach the device before the listener shuts down
     say(f"Added '{device['label']}' as {device['credential_id']} for {username}." if device else "Not added.")
     return device
