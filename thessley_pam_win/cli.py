@@ -127,7 +127,10 @@ def cmd_list(args) -> int:
     for username in names:
         for d in store.devices(username):
             when = datetime.datetime.fromtimestamp(d["enrolled_at"]).strftime("%Y-%m-%d %H:%M")
-            print(f"{username:<16} {d['credential_id']}  {d['label']:<24} enrolled {when}" + ("  (disabled)" if d.get("disabled") else ""))
+            att = d.get("attestation") or {}
+            proof = (f"  TPM verified ({(att.get('maker', '') + ' ' + att.get('model', '')).strip() or 'maker not named'})" if att.get("level") == "tpm"
+                     else "  TPM claimed, not verified" if att.get("level") == "unverified" else "")
+            print(f"{username:<16} {d['credential_id']}  {d['label']:<24} enrolled {when}" + proof + ("  (disabled)" if d.get("disabled") else ""))
             shown = True
     if not shown:
         print("No approvers enrolled.")

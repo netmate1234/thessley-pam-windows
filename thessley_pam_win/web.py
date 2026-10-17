@@ -365,7 +365,7 @@ class WebApp:
     def key_details(self, user: str, device: dict, usage: dict) -> list[tuple[str, str]]:
         """Everything worth knowing about one key, as (name, value) rows."""
         cred = device["credential_id"]
-        rows = attestation_facts(device.get("attestation_chain") or []) + public_key_facts(device.get("public_key", ""))
+        rows = attestation_facts(device.get("attestation_chain") or [], device.get("attestation")) + public_key_facts(device.get("public_key", ""))
         count, when, ip = usage.get(cred, (0, "", ""))
         rows.append(("Approvals in the log", f"{count}" + (f", the last on {when} from {ip}" if count else "")))
         try:
@@ -433,12 +433,31 @@ def public_key_facts(public_key_b64: str) -> list[tuple[str, str]]:
     return [("Algorithm", algo), ("Key fingerprint (SHA-256)", ":".join(digest[i:i + 4] for i in range(0, 32, 4)) + "…")]
 
 
-def attestation_facts(chain: list[str]) -> list[tuple[str, str]]:
-    """What a stored attestation chain says. The computer keeps it but does not check it against a root of trust."""
+def tpm_proof_facts(record: dict | None) -> list[tuple[str, str]]:
+    """What this computer itself concluded about a TPM key at enrolment (see tpmproof.py)."""
+    if not record:
+        return []
+    if record.get("level") == "tpm":
+        maker = (str(record.get("maker", "")) + " " + str(record.get("model", ""))).strip() or "a maker that is not named"
+        when = ""
+        if record.get("checked_at"):
+            when = " on " + datetime.datetime.fromtimestamp(int(record["checked_at"])).strftime("%Y-%m-%d %H:%M")
+        return [("TPM 2.0 proof", f"Verified by this computer{when}: a genuine TPM 2.0 chip from {maker} holds this key. It was "
+                                  "created inside the chip and cannot leave it. Checked against the manufacturer roots shipped "
+                                  "with this program; revocation lists are not checked."),
+                ("TPM maker", maker)]
+    return [("TPM 2.0 proof", f"The app claimed a TPM-held key but this computer could not verify it: {record.get('reason', 'no reason given')}.")]
+
+
+def attestation_facts(chain: list[str], record: dict | None = None) -> list[tuple[str, str]]:
+    """What a stored attestation chain (a phone) or this computer's own TPM check (an app) says about a key. A phone's chain
+    is kept but not checked against a root of trust."""
     if not chain:
+        if record and record.get("level") == "tpm":
+            return [("Kind", "An app key (Thessley Passkey desktop app) held in a TPM chip, proven at enrolment.")] + tpm_proof_facts(record)
         return [("Kind", "An app key (Thessley Passkey desktop app): no hardware attestation was sent. Its protection (PIN, TPM chip, "
                          "security key) is set on that computer."),
-                ("Hardware attestation", "none")]
+                ("Hardware attestation", "none")] + tpm_proof_facts(record)
     facts = [("Kind", "A phone key (Android Keystore)")]
     try:
         certs = [x509.load_der_x509_certificate(base64.b64decode(c)) for c in chain]

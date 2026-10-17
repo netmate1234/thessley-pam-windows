@@ -53,8 +53,8 @@ foreach ($p in @((Split-Path $Python), (Split-Path (Split-Path $Python)))) {
 if ($LASTEXITCODE -ne 0) { throw 'Python 3.10 or newer is needed.' }
 
 # --- 2. libraries ---------------------------------------------------------------------------------------------------
-& $Python -m pip install --quiet --disable-pip-version-check cryptography qrcode
-if ($LASTEXITCODE -ne 0) { throw 'pip could not install cryptography and qrcode.' }
+& $Python -m pip install --quiet --disable-pip-version-check cryptography qrcode asn1crypto
+if ($LASTEXITCODE -ne 0) { throw 'pip could not install cryptography, qrcode and asn1crypto.' }
 
 # --- 3. program and permissions --------------------------------------------------------------------------------------
 New-Item -ItemType Directory -Force $base, $app | Out-Null

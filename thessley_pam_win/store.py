@@ -116,7 +116,10 @@ def all_users() -> list[str]:
         return []
 
 
-def add_device(username: str, public_key: str, label: str, attestation_chain: list[str]) -> dict:
+def add_device(username: str, public_key: str, label: str, attestation_chain: list[str],
+               attestation: dict | None = None) -> dict:
+    """Store one approver. `attestation` is what this computer itself checked at enrolment (TPM proof), if anything:
+    {"level": "tpm", "maker": ..., "model": ..., "checked_at": ...} or {"level": "unverified", "reason": ...}."""
     data = load(username)
     device = {
         "credential_id": "c_" + secrets.token_hex(8),
@@ -126,6 +129,8 @@ def add_device(username: str, public_key: str, label: str, attestation_chain: li
         "last_used": None,
         "attestation_chain": attestation_chain,
     }
+    if attestation:
+        device["attestation"] = attestation
     data["devices"].append(device)
     save(username, data)
     return device

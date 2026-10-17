@@ -432,6 +432,21 @@ class KeyDetailsTest(WebBase):
         self.assertIn("StrongBox (separate secure chip)", body)
         self.assertIn("does not check them against a root of trust", body)
 
+    def test_a_tpm_key_proven_at_enrolment_says_so_with_the_maker(self):
+        store.add_device(USER, FakePhone(USER).public_key, "Desktop in a TPM", [],
+                         {"level": "tpm", "maker": "INTC", "model": "ADL", "checked_at": 1760000000})
+        body = self.keys_body()
+        self.assertIn("held in a TPM chip, proven at enrolment", body)
+        self.assertIn("Verified by this computer", body)
+        self.assertIn("INTC ADL", body)
+        self.assertIn("revocation lists are not checked", body)  # said plainly: what the proof does not cover
+
+    def test_a_tpm_claim_that_did_not_verify_says_why(self):
+        store.add_device(USER, FakePhone(USER).public_key, "Doubtful desktop", [],
+                         {"level": "unverified", "reason": "certified name does not match the key"})
+        body = self.keys_body()
+        self.assertIn("could not verify it: certified name does not match the key", body)
+
     def test_an_unreadable_chain_does_not_break_the_page(self):
         store.add_device(USER, FakePhone(USER).public_key, "Odd phone", ["not base64 der"])
         body = self.keys_body()

@@ -46,6 +46,23 @@ Switch it off any time: `thessley-pam-win web off`. Other settings: `web listen 
   (how long one approval counts, whether users may enrol their own first approver). Their own phone approves each change.
 - **Activity:** the recent approvals, refusals, passes and enrolments from `service.log` (administrators can see everyone's).
 
+## TPM proof
+
+When the Thessley Passkey desktop app enrols a key that is held in a TPM chip (protection "TPM chip + PIN", and so on), it
+also sends a proof, and this computer checks it: the chip's own manufacturer certificate chain (against the roots in
+`thessley_pam_win\\tpm_roots\\`, Intel and AMD shipped), a challenge only that chip can answer (credential activation), and
+the chip's certification that the new key was created inside it and cannot leave it. A key that passes shows "TPM 2.0 proof:
+verified, a genuine chip from INTC ADL" under **Details** here, and in `thessley-pam-win list`; a key that fails shows why.
+
+- **To use it on an existing installation:** pull, re-run `install\\install.ps1` (it now also installs `asn1crypto`, which reads
+  TPM certificates), and enrol the desktop app again with a TPM protection. A key enrolled earlier has no proof.
+- **It never blocks an enrolment:** without a proof the key is still added, and the page says so.
+- **What it does not cover:** revocation lists are not checked, nor the security of the chip's firmware. A maker whose root
+  is not in `tpm_roots` (Infineon, STMicro, Nuvoton ...) is not trusted until you add its root certificate there as a `.pem`
+  file, then re-run `install.ps1`.
+- The same checks, the same code and the same roots as thessley-pam-linux. The proof itself was tested against a real TPM
+  (Intel PTT) and with a synthetic one (`tests/test_tpmproof.py`); not yet tried with a TPM on a Windows computer.
+
 ## How it is kept safe
 
 - Sign-in needs a signature from an approver already enrolled for the account; an account with none, or that does not
