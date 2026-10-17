@@ -85,9 +85,16 @@ def shell_command(shell: str, original: str | None) -> str:
     return f'"{shell}" -c {subprocess.list2cmdline([original])}'
 
 
+def messages_stream(env):
+    """Where the gate's own lines go. A login with a person at a terminal reads them on stdout. When ssh was given a command
+    (scp and sftp are such commands) stdout is the data channel of that program, so one extra line there ("Thessley Passkey:
+    approved ...") breaks it ("Received message too long"); the lines go to stderr, which scp shows and ignores."""
+    return sys.stderr if env.get("SSH_ORIGINAL_COMMAND") else sys.stdout
+
+
 def main(env=None, out=None, address=(HOST, PORT), run=subprocess.call, user=None) -> int:
     env = os.environ if env is None else env
-    out = sys.stdout if out is None else out
+    out = messages_stream(env) if out is None else out
     if hasattr(out, "reconfigure"):
         out.reconfigure(encoding="utf-8", errors="replace")
     try:

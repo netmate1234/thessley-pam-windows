@@ -2,6 +2,7 @@ import io
 import json
 import socket
 import socketserver
+import sys
 import tempfile
 import threading
 import time
@@ -147,6 +148,30 @@ class EndToEnd(unittest.TestCase):
                 s.sendall(raw)
                 reply = json.loads(s.makefile().readline())
             self.assertEqual(reply.get("ok"), False, raw)
+
+
+class WhereTheGateTalks(unittest.TestCase):
+    """scp and sftp run as the command given to ssh: stdout is their data, so the gate's lines must not go there."""
+
+    def run_main(self, env):
+        out, err = Out(), Out()
+        old = sys.stdout, sys.stderr
+        sys.stdout, sys.stderr = out, err
+        try:
+            gate.main(env=env, address=("127.0.0.1", 1), run=lambda cmd: 0, user="alice")   # nothing listens: it refuses and says so
+        finally:
+            sys.stdout, sys.stderr = old
+        return out.getvalue(), err.getvalue()
+
+    def test_a_command_given_to_ssh_gets_the_gate_lines_on_stderr_not_stdout(self):
+        out, err = self.run_main({"SSH_CONNECTION": "192.168.1.50 1 2 22", "SSH_ORIGINAL_COMMAND": "scp -t C:\\x"})
+        self.assertEqual(out, "")
+        self.assertIn("Thessley Passkey", err)
+
+    def test_an_interactive_login_keeps_the_gate_lines_on_stdout(self):
+        out, err = self.run_main({"SSH_CONNECTION": "192.168.1.50 1 2 22"})
+        self.assertIn("Thessley Passkey", out)
+        self.assertEqual(err, "")
 
 
 class FakeService(socketserver.StreamRequestHandler):
