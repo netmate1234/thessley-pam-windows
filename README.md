@@ -16,6 +16,7 @@ Read [docs/SSH.md](docs/SSH.md) first: it explains the design, the limits, the s
 | `thessley_pam_win/approve.py` | the approval flow: link, QR code, signed answer, passes |
 | `thessley_pam_win/cli.py` | `thessley-pam-win enroll / list / remove / grace / passes / status / sshd-config` |
 | `thessley_pam_win/store.py`, `grants.py` | approvers and passes under `C:\ProgramData\ThessleyPamWin` |
+| `thessley_pam_win/web.py` | the admin web page: sign in with an approval, manage your approvers, settings, activity ([docs/WEB.md](docs/WEB.md), has the Windows steps) |
 | `thessley_pam_win/enroll.py`, `peer.py` | adding an approver (shared by the admin tool and the service); finding out which Windows account is on the other end of a local connection |
 | `thessley_pam_win/protocol.py` | **copied unchanged** from thessley-pam-linux (`05065e3`); keep byte-identical with the Android app |
 | `thessley_pam_win/listener.py` | copied from thessley-pam-linux (`05065e3`) with **one change**: it binds its port exclusively (`SO_EXCLUSIVEADDRUSE`), because on Windows the default lets two listeners share a port |

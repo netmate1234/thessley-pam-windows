@@ -20,7 +20,10 @@ if ((Test-Path $cfg) -and (Select-String -Path $cfg -Pattern 'ThessleyPamWin' -Q
 }
 Stop-ScheduledTask -TaskName 'ThessleyPamWin' -ErrorAction SilentlyContinue
 Unregister-ScheduledTask -TaskName 'ThessleyPamWin' -Confirm:$false -ErrorAction SilentlyContinue
+Stop-ScheduledTask -TaskName 'ThessleyPamWinWeb' -ErrorAction SilentlyContinue
+Unregister-ScheduledTask -TaskName 'ThessleyPamWinWeb' -Confirm:$false -ErrorAction SilentlyContinue
 Remove-NetFirewallRule -DisplayName 'Thessley Passkey approvals' -ErrorAction SilentlyContinue
+Remove-NetFirewallRule -DisplayName 'Thessley admin web page' -ErrorAction SilentlyContinue
 if ($RemoveData) {
     Remove-Item -Recurse -Force $base
     Write-Host 'Removed the program and all data.'

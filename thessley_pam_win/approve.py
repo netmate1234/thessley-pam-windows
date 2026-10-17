@@ -39,6 +39,8 @@ def _display_fields(service: str, rhost: str) -> dict:
 
 
 APPROVE_SERVICE = "thessley-enroll"  # what the apps are told an "adding a device" approval is (same name as thessley-pam-linux)
+WEB_SERVICE = "thessley-web"                # the admin web page: signing in (the apps say "admin page sign-in")
+WEB_CHANGE_SERVICE = "thessley-web-change"  # ... and a change made there ("a change to your keys")
 
 
 def _link_fields(tty: str, rhost: str) -> dict:
@@ -48,6 +50,10 @@ def _link_fields(tty: str, rhost: str) -> dict:
         return _display_fields("sshd", rhost)
     if tty == "add-device":
         return _display_fields(APPROVE_SERVICE, grants.LOCAL)
+    if tty == "web":
+        return _display_fields(WEB_SERVICE, rhost)
+    if tty == "web-change":
+        return _display_fields(WEB_CHANGE_SERVICE, rhost)
     return {}
 
 
@@ -158,7 +164,8 @@ def run(username: str, rhost: str, tty: str, say: Callable[[str], None], log: Ca
                 "m": mid, "hn": host, "u": username, "tty": tty,
                 **_link_fields(tty, rhost),
             })
-            what = "adding a device for" if tty == "add-device" else "the ssh login for"
+            what = {"add-device": "adding a device for", "web": "the admin page sign-in for",
+                    "web-change": "a change to the keys of"}.get(tty, "the ssh login for")
             say(f"Approve {what} {username} on {host} with Thessley Passkey (within {int(wait)} s):")
             say(f"Link: {link}")  # above the QR code, so it stays in view when the code scrolls the screen
             for line in qr.lines(link, border=2):

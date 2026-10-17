@@ -97,6 +97,25 @@ def set_disabled(username: str, credential_id: str, disabled: bool) -> bool:
     return False
 
 
+def rename_device(username: str, credential_id: str, label: str) -> bool:
+    """Change the name an approver is listed under. False if there is no such approver."""
+    data = load(username)
+    for d in data["devices"]:
+        if d["credential_id"] == credential_id:
+            d["label"] = label
+            save(username, data)
+            return True
+    return False
+
+
+def all_users() -> list[str]:
+    """Every account that has an approver list (enrolled now or earlier), sorted."""
+    try:
+        return sorted(n[:-5] for n in os.listdir(users_dir()) if n.endswith(".json") and not n.startswith("."))
+    except OSError:
+        return []
+
+
 def add_device(username: str, public_key: str, label: str, attestation_chain: list[str]) -> dict:
     data = load(username)
     device = {

@@ -20,6 +20,7 @@
 param(
     [Parameter(Mandatory = $true)][string]$Python,
     [switch]$OpenFirewall,
+    [switch]$OpenWebFirewall,   # also allow the admin web page's port (47820) from the local subnet
     [ValidateSet('Private', 'Any')][string]$FirewallProfile = 'Private'   # 'Any' also covers networks Windows calls Public
 )
 $ErrorActionPreference = 'Stop'
@@ -32,6 +33,7 @@ $repo = Split-Path -Parent $PSScriptRoot
 $base = Join-Path $env:ProgramData 'ThessleyPamWin'
 $app  = Join-Path $base 'app'
 $task = 'ThessleyPamWin'
+$webTask = 'ThessleyPamWinWeb'
 
 # --- 1. the Python must be out of reach of normal users --------------------------------------------------------------
 $Python = (Resolve-Path $Python).Path
@@ -60,7 +62,7 @@ Remove-Item -Recurse -Force (Join-Path $app 'thessley_pam_win') -ErrorAction Sil
 Copy-Item -Recurse -Force (Join-Path $repo 'thessley_pam_win') $app
 Get-ChildItem (Join-Path $app 'thessley_pam_win') -Recurse -Directory -Filter '__pycache__' | Remove-Item -Recurse -Force
 
-foreach ($entry in @(@('daemon_main.py', 'daemon'), @('gate_main.py', 'gate'), @('cli_main.py', 'cli'))) {
+foreach ($entry in @(@('daemon_main.py', 'daemon'), @('gate_main.py', 'gate'), @('cli_main.py', 'cli'), @('web_main.py', 'web'))) {
     @"
 import os
 import sys
@@ -96,6 +98,17 @@ $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccou
 $settings  = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 5 -RestartInterval (New-TimeSpan -Minutes 1) -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew
 Register-ScheduledTask -TaskName $task -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description 'Thessley Passkey approvals for ssh logins' | Out-Null
 Start-ScheduledTask -TaskName $task
+
+# The admin web page (docs\WEB.md) is its own task, also SYSTEM at boot. It stays OFF until `thessley-pam-win web on`; an
+# upgrade keeps it on if it was on.
+$webWasOn = $false
+$old = Get-ScheduledTask -TaskName $webTask -ErrorAction SilentlyContinue
+if ($old -and $old.State -ne 'Disabled') { $webWasOn = $true }
+Stop-ScheduledTask -TaskName $webTask -ErrorAction SilentlyContinue
+Unregister-ScheduledTask -TaskName $webTask -Confirm:$false -ErrorAction SilentlyContinue
+$webAction = New-ScheduledTaskAction -Execute $Python -Argument "-I -X utf8 `"$app\web_main.py`""
+Register-ScheduledTask -TaskName $webTask -Action $webAction -Trigger $trigger -Principal $principal -Settings $settings -Description 'Thessley admin web page' | Out-Null
+if ($webWasOn) { Start-ScheduledTask -TaskName $webTask } else { Disable-ScheduledTask -TaskName $webTask | Out-Null }
 Start-Sleep -Seconds 3
 
 # --- 5. optional firewall rule for the phone/app to reach the approval window --------------------------------------------
@@ -104,6 +117,13 @@ if ($OpenFirewall) {
     New-NetFirewallRule -DisplayName 'Thessley Passkey approvals' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 47810-47819 `
         -Program $Python -Profile $FirewallProfile -RemoteAddress LocalSubnet | Out-Null
     Write-Host "Firewall: allowed TCP 47810-47819 from the local subnet ($FirewallProfile networks)."
+}
+
+if ($OpenWebFirewall) {
+    Remove-NetFirewallRule -DisplayName 'Thessley admin web page' -ErrorAction SilentlyContinue
+    New-NetFirewallRule -DisplayName 'Thessley admin web page' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 47820 `
+        -Program $Python -Profile $FirewallProfile -RemoteAddress LocalSubnet | Out-Null
+    Write-Host "Firewall: allowed TCP 47820 (the admin web page) from the local subnet ($FirewallProfile networks)."
 }
 
 $cli = Join-Path $base 'thessley-pam-win.cmd'

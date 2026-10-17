@@ -22,10 +22,11 @@ import json
 import os
 import queue
 import socket
+import subprocess
 import sys
 import threading
 
-from . import approve, enroll, grants, store
+from . import approve, enroll, grants, machine, store
 from .daemon import HOST, PORT
 from .gate import current_user
 
@@ -191,6 +192,60 @@ def cmd_status(args) -> int:
     return 0
 
 
+WEB_TASK = "ThessleyPamWinWeb"
+
+
+def _task(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["schtasks", *args], capture_output=True, text=True, check=False)
+
+
+def cmd_web(args) -> int:
+    """The admin web page: settings, and the scheduled task that runs it (see web.py)."""
+    action, values = args.action or "status", args.values
+    if action == "serve":
+        from . import web
+        return web.serve()
+    _need_admin()
+    if action in ("on", "off"):
+        grants.set_web(enabled=(action == "on"))
+        if action == "on":
+            _task("/Change", "/TN", WEB_TASK, "/ENABLE")
+            _task("/End", "/TN", WEB_TASK)  # a restart picks up new settings
+            started = _task("/Run", "/TN", WEB_TASK)
+            if started.returncode != 0:
+                print("The web page's task is not installed yet: re-run install\\install.ps1 (it creates it).")
+        else:
+            _task("/End", "/TN", WEB_TASK)
+            _task("/Change", "/TN", WEB_TASK, "/DISABLE")
+    elif action == "listen":
+        grants.set_web(listen=(values[0] if values and values[0] not in ("auto", "lan") else ""))
+    elif action in ("port", "session"):
+        if len(values) != 1 or not values[0].isdigit():
+            sys.exit(f"Usage: thessley-pam-win web {action} NUMBER")
+        grants.set_web(**({"port": int(values[0])} if action == "port" else {"session_minutes": int(values[0])}))
+    elif action == "cert":
+        if len(values) != 2:
+            sys.exit("Usage: thessley-pam-win web cert CERT_FILE KEY_FILE   (a certificate your browsers trust)")
+        grants.set_web(cert=values[0], key=values[1])
+    elif action != "status":
+        sys.exit("Say status, on, off, serve, listen, port, session or cert.")
+    from . import web
+    st = grants.web_settings()
+    ip = st["listen"] or machine.lan_ip()
+    cert, _ = (st["cert"], st["key"]) if st["cert"] and st["key"] else web.default_cert_paths()
+    print(f"Admin web page: {'ON' if st['enabled'] else 'off'}   https://{ip}:{st['port']}/   (sessions end after {st['session_minutes']} min idle)")
+    if os.path.exists(cert):
+        import hashlib
+        from cryptography import x509
+        from cryptography.hazmat.primitives import serialization
+        with open(cert, "rb") as f:
+            der = x509.load_pem_x509_certificate(f.read()).public_bytes(serialization.Encoding.DER)
+        print(f"Certificate SHA-256: {hashlib.sha256(der).hexdigest()}")
+    if st["listen"] in ("0.0.0.0", "::"):
+        print("It listens on every network address: make sure only networks you trust can reach this port.")
+    return 0
+
+
 def cmd_sshd_config(args) -> int:
     username = _user(args.user)
     print(f"""Add this to the END of C:\\ProgramData\\ssh\\sshd_config (a Match block must be last), then restart sshd:
@@ -237,6 +292,9 @@ def main(argv=None) -> int:
     sub.add_parser("status", help="is the service running")
     se = sub.add_parser("self-enroll", help="may an account with no approver enrol its first one itself")
     se.add_argument("state", nargs="?", choices=["on", "off"])
+    wb = sub.add_parser("web", help="the admin web page: sign in with an approval, manage your approvers")
+    wb.add_argument("action", nargs="?", choices=("status", "on", "off", "serve", "listen", "port", "session", "cert"))
+    wb.add_argument("values", nargs="*")
     sc = sub.add_parser("sshd-config", help="the sshd_config lines for a user")
     sc.add_argument("--user")
     if hasattr(sys.stdout, "reconfigure"):
@@ -246,7 +304,7 @@ def main(argv=None) -> int:
         "enroll": cmd_enroll, "list": cmd_list, "remove": cmd_remove,
         "disable": lambda x: cmd_disable(x, True), "enable": lambda x: cmd_disable(x, False),
         "grace": cmd_grace, "passes": cmd_passes, "end-pass": cmd_end_pass, "status": cmd_status,
-        "sshd-config": cmd_sshd_config, "self-enroll": cmd_self_enroll,
+        "sshd-config": cmd_sshd_config, "self-enroll": cmd_self_enroll, "web": cmd_web,
     }[a.cmd](a)
 
 
