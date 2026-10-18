@@ -160,11 +160,12 @@ def cmd_disable(args, disabled: bool = True) -> int:
 def cmd_grace(args) -> int:
     _need_admin()
     if args.hours is not None:
-        grants.set_grace(args.hours)
+        grants.set_grace(args.hours, args.ip_scope)
         if args.hours <= 0:
             print(f"Passes ended: {grants.revoke()}")
     hours = grants.grace_hours()
-    print(f"One approval counts for {hours:g} h from the same address." if hours else "Every ssh login asks for an approval.")
+    scope = "any client IP" if grants.grace_any_ip() else "the same client IP"
+    print(f"One approval counts for {hours:g} h from {scope}." if hours else "Every ssh login asks for an approval.")
     return 0
 
 
@@ -291,6 +292,7 @@ def main(argv=None) -> int:
         d.add_argument("credential_id")
     g = sub.add_parser("grace", help="show or set how long one approval counts")
     g.add_argument("--hours", type=float)
+    g.add_argument("--ip-scope", choices=("same", "any"), help="limit the pass to its original client IP, or allow any IP")
     sub.add_parser("passes", help="who holds a pass")
     ep = sub.add_parser("end-pass", help="end passes")
     ep.add_argument("--user")

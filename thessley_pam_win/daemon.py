@@ -28,7 +28,8 @@ import socketserver
 import threading
 import time
 
-from . import approve, enroll, grants, peer, store
+from . import approve, enroll, grants, machine, peer, store, web
+from .listener import SharedListener
 
 HOST, PORT = "127.0.0.1", 47800
 MAX_REQUEST = 2048
@@ -227,12 +228,20 @@ class Server(socketserver.ThreadingTCPServer):
 def main() -> int:
     store.ensure_dirs()
     grants.clear_all()  # a restart ends every pass
+    ip = machine.lan_ip()
+    cert_dir = os.path.join(store.BASE, "approvals")
+    cert_path, key_path = os.path.join(cert_dir, "cert.pem"), os.path.join(cert_dir, "key.pem")
+    fingerprint = web.ensure_cert(cert_path, key_path, [ip])
+    shared = SharedListener(ip, cert_path, key_path, fingerprint)
+    shared.start()
+    approve.set_shared_listener(shared)
     server = Server()
-    log(f"service started on {HOST}:{server.server_address[1]}")
+    log(f"service started on {HOST}:{server.server_address[1]} and HTTPS approval listener {ip}:47810")
     try:
         server.serve_forever()
     finally:
         server.server_close()
+        shared.close()
     return 0
 
 

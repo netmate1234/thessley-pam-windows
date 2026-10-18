@@ -2,7 +2,8 @@
 
 For chosen Windows accounts, `ssh` asks for the account's **password** (or accepts its **ssh key**, see
 "Key instead of password") and then shows a **QR code and a `thessleypam://` link**. The login continues only after an enrolled phone (or the Thessley Passkey desktop app) approves
-it with a signature. Optionally, one approval then counts for N hours from the same address (a "pass").
+it with a signature. Optionally, one approval then counts for N hours from the same address or, in configurable cloud
+mode, from any client address (a "pass").
 
 This is the Windows counterpart of [thessley-pam-linux](../../thessley-pam-linux/docs/SSH.md). It speaks the same
 protocol, so the same phone app and the same desktop app (`thessley-passkey respond` / "Paste a link") approve it.
@@ -16,8 +17,9 @@ Windows OpenSSH has no PAM, so the approval cannot sit inside the authentication
 2. For the chosen account, `sshd_config` has `ForceCommand gate.cmd`. `sshd` starts the **gate** instead of the user's shell.
 3. The gate (runs as the user, standard library only) asks the **approval service** over `127.0.0.1:47800`, prints what the
    service says (the link and the QR code) into the ssh terminal, and waits.
-4. The service (runs as **SYSTEM**) opens a short-lived HTTPS listener with a throw-away certificate whose SHA-256 is in the
-   link, waits for a signed `approve` from one of the account's enrolled approvers, and answers the gate yes or no.
+4. The service (runs as **SYSTEM**) registers the request with its shared HTTPS listener on TCP 47810. The listener uses a
+   stable certificate whose SHA-256 is in the link and routes each signed phone response to its matching request. It handles
+   concurrent approvals on one port; an SSH login does not open or hold a separate port. It then answers the gate yes or no.
    A **refusal** (`deny`) may arrive without a signature, so the phone does not ask for a fingerprint to say no: it then
    carries the request's own nonce, which only the person who saw the link has. An approval always needs the signature, and
    an unsigned answer from a phone that is not enrolled for the account is refused. (Same rule as thessley-pam-linux.)
@@ -152,9 +154,13 @@ If the key is lost, nobody can log in to that account over ssh. Keep a second wa
 
        & "C:\ProgramData\ThessleyPamWin\thessley-pam-win.cmd" grace --hours 4
 
-   It prints `One approval counts for 4 h from the same address.` In a window that is not elevated it only says to run it as
-   administrator and changes nothing. The pass is created by the next approval *after* you set this, and a login from
-   another address asks again.
+   On a cloud host whose SSH clients can arrive from changing addresses, use `grace --hours 4 --ip-scope any` instead.
+   This is a per-computer setting; switch back with `grace --hours 4 --ip-scope same`. A pass still requires an enrolled
+   approver and applies only until its fixed expiry.
+
+   It prints the configured address scope. In a window that is not elevated it only says to run it as administrator and
+   changes nothing. The pass is created by the next approval *after* you set this; in same-IP mode, a login from another
+   address asks again.
 
 7. Log in from another computer:
 
@@ -172,7 +178,7 @@ The Thessley Passkey desktop app (`thessley-passkey-linux`) enrols and approves 
     thessley-passkey enroll 'thessleypam://enroll?...' --protect tpm+pin --label "my laptop"
     thessley-passkey respond 'thessleypam://sudo?...' --approve
 
-or paste the link into the app. The approver must reach this computer on TCP 47810-47819 while a login waits, and the two
+or paste the link into the app. The approver must reach this computer on TCP 47810 while an SSH login waits, and the two
 clocks must agree within a minute.
 
 ## Enrolling without an administrator
@@ -215,7 +221,7 @@ installation re-run it, or in an administrator PowerShell:
     thessley-pam-win disable|enable --user N ID  switch an approver off or on (its passes end with it)
     thessley-pam-win remove --user N ID          forget an approver
     thessley-pam-win self-enroll [on|off]        may an account with no approver enrol its first one itself
-    thessley-pam-win grace --hours 4             one approval counts for 4 h from the same address (0 = every login asks)
+    thessley-pam-win grace --hours 4 [--ip-scope same|any] one approval counts for 4 h (0 = every login asks)
     thessley-pam-win passes                      who holds a pass
     thessley-pam-win end-pass [--user N]         end passes now
 
@@ -239,7 +245,7 @@ The service writes `C:\ProgramData\ThessleyPamWin\service.log` (approvals, denia
 | The desktop app says "This computer is not enrolled with ..." when you paste a link | You pasted the **first** link of an add-device enrolment ("Approve adding a device"). That one is answered by the phone or app that is **already** enrolled; the new device gets the second link, which appears after the approval |
 | Enrolling the desktop app with a TPM protection asks for administrator rights, or fails without a prompt | Fixed in thessley-passkey-linux `1a173d0`: enrolling as an approver for a computer needs no administrator rights (only a website's TPM proof does). Update the app |
 | `enroll` is denied or cannot start for a normal user | `thessley-pam-win.cmd` is not readable by Users: re-run `install.ps1` (see above) |
-| The phone cannot reach the computer | The network is "Public" in Windows (the rule is Private only), or the phone is on mobile data, or a third-party firewall blocks 47810-47819 |
+| The phone cannot reach the computer | The network is "Public" in Windows (the rule is Private only), or the phone is on mobile data, or a third-party firewall blocks TCP 47810 |
 | "Phone clock is off by more than a minute" | Fix the time on the phone or on this computer |
 | The login ends right after the password with no QR code | `gate.cmd` failed to start: check the path in `ForceCommand`, and that Python is where `gate.cmd` says |
 | QR code looks broken | The terminal is not UTF-8 or too narrow; use the `Link:` line with the desktop app |
@@ -251,7 +257,7 @@ The service writes `C:\ProgramData\ThessleyPamWin\service.log` (approvals, denia
 ## What has and has not been tested
 
 Tested (`python -m pytest`): the approval flow, deny, wrong and forged signatures, replays, another user's phone,
-timeouts, passes (same address only, fixed length, ended by removing or disabling the approver), the gate and the service
+timeouts, passes (fixed length, ended by removing or disabling the approver), the gate and the service
 end to end on localhost with a stand-in phone that signs like the real apps, and that the gate refuses on anything but a
 clear yes.
 

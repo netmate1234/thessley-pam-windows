@@ -46,6 +46,11 @@ def _load_config() -> dict:
         return {}
 
 
+def grace_any_ip() -> bool:
+    """Whether grace passes apply regardless of the SSH client's address."""
+    return _load_config().get("grace_any_ip") is True
+
+
 def grace_hours() -> float:
     """Hours an approval stays valid; 0 means every login asks (the default)."""
     try:
@@ -55,14 +60,21 @@ def grace_hours() -> float:
     return min(max(hours, 0.0), MAX_HOURS)
 
 
-def set_grace(hours: float) -> None:
+def set_grace(hours: float, ip_scope: str | None = None) -> None:
     hours = min(max(float(hours), 0.0), MAX_HOURS)
+    if ip_scope not in (None, "same", "any"):
+        raise ValueError("IP scope must be 'same' or 'any'.")
     store.ensure_dirs()
     data = _load_config()
     if hours > 0:
         data["grace"] = hours
     else:
         data.pop("grace", None)
+    if ip_scope is not None:
+        if ip_scope == "any":
+            data["grace_any_ip"] = True
+        else:
+            data.pop("grace_any_ip", None)
     _atomic_write(_config_path(), data, store.BASE)
 
 

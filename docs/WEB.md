@@ -50,6 +50,8 @@ address: `thessley-pam-win web listen auto`. Every page says which computer it i
 
 ## What you can do in it
 
+The page opens in dark mode. Use the **Light mode** button in the header to switch themes; the choice is remembered in that browser.
+
 - **Your approvers:** a list with a *Details* fold-out for each (kind: phone or app; where a phone's key lives: StrongBox, TEE
   or software; key fingerprint; use count and last use; passes it granted), and *rename*, *switch off/on*, *remove*, *add a
   phone or app* (QR and link, compare the 6-digit codes, press "The codes match").
@@ -60,7 +62,7 @@ address: `thessley-pam-win web listen auto`. Every page says which computer it i
 - **Passes:** under your approvers, the ssh approvals that currently let your account in without asking your device again
   (the grace hours), each with an **End this pass** button, and **End all passes**. The next login then asks your device again.
   Ending a pass only takes access away, so it needs no fresh approval.
-- **Activity:** the recent approvals, refusals, passes and enrolments from `service.log` (administrators can see everyone's).
+- **Activity:** the newest 3,000 approvals, refusals, passes and enrolments from the current and rotated `service.log`, shown 20 per page (administrators can see everyone's).
 
 ## TPM proof
 

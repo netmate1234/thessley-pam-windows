@@ -24,6 +24,13 @@ PORT = 47810
 PORT_TRIES = 10  # logins at the same time each need a listener; the next free port from PORT is used
 WAIT = 90        # seconds to approve (unlock the phone, find the app): the same as thessley-pam-linux
 REQUEST_TYPE = "sudo"  # what the apps call an approval for a command-line login (thessley-pam uses the same for ssh)
+_shared_listener = None
+
+
+def set_shared_listener(shared) -> None:
+    """Use the daemon's permanent listener for approvals handled by that process."""
+    global _shared_listener
+    _shared_listener = shared
 
 
 def _display_fields(service: str, rhost: str) -> dict:
@@ -59,8 +66,11 @@ def _link_fields(tty: str, rhost: str) -> dict:
 
 @contextlib.contextmanager
 def _listening(ip: str, routes: dict, port: int = PORT):
-    """A listener on `port`, or on the next free port when another login is still waiting for its approval.
-    The port travels in the link, so the phone and the desktop app go wherever it ended up."""
+    """Register daemon approvals on its shared listener; keep ephemeral ports for standalone callers."""
+    if _shared_listener is not None and port == PORT:
+        with _shared_listener.register(routes) as shared:
+            yield shared
+        return
     lst = None
     for p in range(port, port + PORT_TRIES):
         candidate = Listener(ip, p, routes)
@@ -103,9 +113,10 @@ def run(username: str, rhost: str, tty: str, say: Callable[[str], None], log: Ca
 
     rhost = rhost or grants.LOCAL
     grace = grants.grace_hours()
+    pass_rhost = "*" if grants.grace_any_ip() else rhost
     if grace > 0 and use_pass:
         try:
-            held = grants.valid(username, rhost, {d["credential_id"] for d in devices})
+            held = grants.valid(username, pass_rhost, {d["credential_id"] for d in devices})
         except OSError:
             held = None
         if held:
@@ -171,7 +182,8 @@ def run(username: str, rhost: str, tty: str, say: Callable[[str], None], log: Ca
             for line in qr.lines(link, border=2):
                 say(line)
             if grace > 0 and grant_pass:
-                say(f"After you approve, your next login from {rhost} needs no approval for {grace:g} h.")
+                pass_scope = "any client IP" if grants.grace_any_ip() else rhost
+                say(f"After you approve, your next login from {pass_scope} needs no approval for {grace:g} h.")
             say("Waiting for the approval...")
             deadline = time.monotonic() + wait
             answered = False
@@ -204,9 +216,10 @@ def run(username: str, rhost: str, tty: str, say: Callable[[str], None], log: Ca
         pass  # last_used is informational; never fail a valid approval over it
     if grace > 0 and grant_pass:
         try:
-            grants.add(username, rhost, grace, outcome["cred"])
-            say(f"Thessley Passkey: approved. Your next login from {rhost} needs no approval for {grace:g} h.")
-            log(f"pass granted to {username} (from {rhost}, {grace:g} h)", False)
+            grants.add(username, pass_rhost, grace, outcome["cred"])
+            pass_scope = "any client IP" if grants.grace_any_ip() else rhost
+            say(f"Thessley Passkey: approved. Your next login from {pass_scope} needs no approval for {grace:g} h.")
+            log(f"pass granted to {username} (from {pass_scope}, {grace:g} h)", False)
         except OSError as e:
             log(f"could not record the pass for {username}: {e}", True)  # the login itself is still approved
     log(f"approved by {outcome['label']!r} ({outcome['cred']}) from {outcome['ip']} for {username} (from {rhost})", False)
