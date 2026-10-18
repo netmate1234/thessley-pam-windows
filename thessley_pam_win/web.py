@@ -855,9 +855,19 @@ def admin_page(viewer: Session, flash: str) -> str:
               f'Applies from the next sign-in. 1 to 240 minutes.</div>'
               f'<form method="post" action="/admin/set" class="row">{hidden}<input type="hidden" name="name" value="session">'
               f'<input type="text" name="value" value="{session}" style="width:6rem"> minutes <button>Change</button></form></div>')
+    ssh_help = ("<div class='card'><strong>SSH login path on Windows</strong>"
+                "<p>Windows OpenSSH checks the account factor first, then starts the Thessley QR approval gate. "
+                "Choose that first factor in <code>sshd_config</code>: account password, SSH key, or key followed by account password. "
+                "Every gated path still needs phone approval.</p>"
+                "<p><strong>Difference from Linux:</strong> QR-only SSH and falling back to a password when QR approval fails "
+                "cannot be selected here; Windows starts the gate only after OpenSSH authentication has succeeded. "
+                "The admin page does not edit or restart <code>sshd</code>.</p>"
+                "<p>Generate a block with <code>thessley-pam-win sshd-config --user NAME --factor password</code>, "
+                "or use <code>--factor key</code> / <code>--factor key-password</code>. Review the block and keep a working "
+                "session open while applying it. Always back up the config and run <code>sshd -t</code> before restarting.</p></div>")
     return (flash_html(flash) + "<h2>Settings for this computer</h2>"
             "<p class='dim'>Only administrators see this page. Every change asks your device for a fresh approval.</p>"
-            + grace + toggle + f"<p class='dim'>Passes held right now: {esc(len(grants.all_passes()))}.</p>")
+            + ssh_help + grace + toggle + f"<p class='dim'>Passes held right now: {esc(len(grants.all_passes()))}.</p>")
 
 
 # ---- HTTP ------------------------------------------------------------------------------------------------------

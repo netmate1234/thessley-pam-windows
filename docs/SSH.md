@@ -110,15 +110,23 @@ the window short; `thessley-pam-win end-pass` ends passes at once. Turned off by
        Restart-Service sshd
 
    Keep one working session open while you try a new login, and keep a copy of `sshd_config`.
-   (The `sshd-config` command prints the password variant; for the key variant use the block under "Key instead of password".)
+   The command prints a password-first block by default. Select the first factor explicitly with
+   `sshd-config --user YOURNAME --factor password|key|key-password`. Keep one working session open, back up the file,
+   validate with `sshd -t`, and only then restart the service.
 
    If `YOURNAME` is an **administrator**, the stock `Match Group administrators` block at the end of the file also
    applies. Put your `Match User` block **above** it (sshd uses the first value it finds for each setting).
 
-**Key instead of password**
+**Select the first factor**
 
-The block above uses the password (`PubkeyAuthentication no`), so an ssh key you add for that account is **ignored**. To use the key
-as the first factor instead (the Linux way: key, then phone), change the account's block:
+Windows OpenSSH authenticates the account before it starts `gate.cmd`; the gate then asks for phone approval. Pick one
+of these first-factor choices when generating the `Match User` block:
+
+- `--factor password`: account password, then phone approval. SSH keys are disabled for this account.
+- `--factor key`: SSH key, then phone approval. Account passwords are disabled for this account.
+- `--factor key-password`: SSH key and then account password, then phone approval.
+
+The key-only block looks like this:
 
     Match User YOURNAME
         PasswordAuthentication no
@@ -132,9 +140,12 @@ as the first factor instead (the Linux way: key, then phone), change the account
         PermitTTY yes
         ForceCommand C:\ProgramData\ThessleyPamWin\gate.cmd
 
-The password is then not accepted at all for that account. Key, **then** password, **then** phone (strictest) is
-`AuthenticationMethods publickey,password` with both `PasswordAuthentication yes` and `PubkeyAuthentication yes`.
-Restart `sshd` afterwards, as above (`sshd -t` first).
+The password is then not accepted at all for that account. The strictest option requires a key and **then** password
+before phone approval; generate it with `--factor key-password`.
+
+**Windows limitation:** unlike the Linux PAM module, this gate cannot provide QR-only authentication or let a user
+fall back to a password after phone approval fails. OpenSSH must accept a first factor before it launches the gate.
+The admin web page describes these choices but deliberately does not edit `sshd_config` or restart the SSH service.
 
 On Windows the key must be where `sshd` looks, with permissions it accepts, or it is silently ignored:
 

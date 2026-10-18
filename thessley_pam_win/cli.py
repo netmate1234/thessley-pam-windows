@@ -12,7 +12,8 @@ Everything else needs an administrator terminal.
     thessley-pam-win end-pass [--user NAME]          end passes at once
     thessley-pam-win self-enroll [on|off]            may an account with no approver enrol its first one itself
     thessley-pam-win status                          is the approval service running, and what is set
-    thessley-pam-win sshd-config --user NAME         the lines to add to sshd_config for that user
+    thessley-pam-win sshd-config --user NAME [--factor password|key|key-password]
+                                                    print a safe sshd_config block (QR approval always follows)
 """
 
 import argparse
@@ -254,13 +255,24 @@ def cmd_web(args) -> int:
 
 def cmd_sshd_config(args) -> int:
     username = _user(args.user)
-    print(f"""Add this to the END of C:\\ProgramData\\ssh\\sshd_config (a Match block must be last), then restart sshd:
+    factor = args.factor
+    if factor == "password":
+        first_factor = """    PasswordAuthentication yes
+    PubkeyAuthentication no
+    AuthenticationMethods password"""
+    elif factor == "key":
+        first_factor = """    PasswordAuthentication no
+    PubkeyAuthentication yes
+    AuthenticationMethods publickey"""
+    else:
+        first_factor = """    PasswordAuthentication yes
+    PubkeyAuthentication yes
+    AuthenticationMethods publickey,password"""
+    print(f"""Add this to C:\\ProgramData\\ssh\\sshd_config in the correct Match User section (see docs before changing it):
 
 Match User {username}
-    PasswordAuthentication yes
-    PubkeyAuthentication no
+{first_factor}
     KbdInteractiveAuthentication no
-    AuthenticationMethods password
     AllowTcpForwarding no
     AllowAgentForwarding no
     X11Forwarding no
@@ -270,7 +282,10 @@ Match User {username}
 
 Check it first with:   & "$env:WINDIR\\System32\\OpenSSH\\sshd.exe" -t      (or C:\\Program Files\\OpenSSH\\sshd.exe -t)
 Then (administrator):  Restart-Service sshd
-Keep one working session open while you try a new login.""")
+Keep one working session open while you try a new login.
+
+This first factor is followed by phone QR approval via the gate. Windows OpenSSH starts the gate only after
+authentication; QR-only and bypass-on-QR-failure policies are not supported by this Windows design.""")
     return 0
 
 
@@ -304,6 +319,8 @@ def main(argv=None) -> int:
     wb.add_argument("values", nargs="*")
     sc = sub.add_parser("sshd-config", help="the sshd_config lines for a user")
     sc.add_argument("--user")
+    sc.add_argument("--factor", choices=("password", "key", "key-password"), default="password",
+                    help="required sshd first factor(s); phone QR approval still follows")
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # the QR code is drawn with block characters
     a = p.parse_args(argv)
