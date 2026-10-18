@@ -356,6 +356,9 @@ class WebApp:
             if name == "grace":
                 grants.set_grace(float(value))
                 return "/admin", f"One approval now counts for {float(value):g} h (0 = every login asks)."
+            if name == "session":
+                grants.set_web(session_minutes=int(float(value)))
+                return "/admin", f"You are now signed out after {int(float(value))} minutes without activity (from the next sign-in)."
             if name == "self_enroll":
                 grants.set_self_enroll_first(value == "on")
                 return "/admin", "Users enrolling their own first approver: " + ("on." if value == "on" else "off.")
@@ -779,6 +782,12 @@ def admin_page(viewer: Session, flash: str) -> str:
               f'<div class="dim">An account with no approver at all can add its first one itself (thessley-pam-win enroll). More approvers always need an approval.</div>'
               f'<form method="post" action="/admin/set" class="row">{hidden}<input type="hidden" name="name" value="self_enroll">'
               f'<button name="value" value="{"off" if first else "on"}">Switch {"off" if first else "on"}</button></form></div>')
+    session = grants.web_settings()["session_minutes"]
+    grace += (f'<div class="card"><strong>Stay signed in to this page</strong>: {session} minutes without activity'
+              f'<div class="dim">After this long without clicking anything you are signed out (always after 8 hours). '
+              f'Applies from the next sign-in. 1 to 240 minutes.</div>'
+              f'<form method="post" action="/admin/set" class="row">{hidden}<input type="hidden" name="name" value="session">'
+              f'<input type="text" name="value" value="{session}" style="width:6rem"> minutes <button>Change</button></form></div>')
     return (flash_html(flash) + "<h2>Settings for this computer</h2>"
             "<p class='dim'>Only administrators see this page. Every change asks your device for a fresh approval.</p>"
             + grace + toggle + f"<p class='dim'>Passes held right now: {esc(len(grants.all_passes()))}.</p>")
@@ -1041,6 +1050,13 @@ def make_handler(app: WebApp):
                     hours = -1
                 if not 0 <= hours <= grants.MAX_HOURS:
                     return self.html(400, "Not valid", flash_html(f"Give a number of hours from 0 to {grants.MAX_HOURS:g}."), s)
+            elif name == "session":
+                try:
+                    minutes = float(value)
+                except ValueError:
+                    minutes = -1
+                if not 1 <= minutes <= 240:
+                    return self.html(400, "Not valid", flash_html("Give a number of minutes from 1 to 240."), s)
             elif name == "self_enroll":
                 if value not in ("on", "off"):
                     return self.html(400, "Not valid", flash_html("Choose on or off."), s)

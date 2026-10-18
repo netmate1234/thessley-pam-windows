@@ -426,6 +426,15 @@ class WebTest(WebBase):
         self.assertEqual(resp.status, 200)
         self.assertIn("Bob&#x27;s phone", body)
 
+    def test_the_session_length_can_be_changed_and_is_validated(self):
+        self.admin = True
+        self.login()
+        self.assertIn("Stay signed in to this page", self.b.get("/admin")[1])
+        for bad in ("0", "241", "abc", "-5", ""):
+            self.assertEqual(self.b.post("/admin/set", {"csrf": self.csrf(), "name": "session", "value": bad})[0].status, 400, bad)
+        self.step_up("/admin/set", {"name": "session", "value": "120"})
+        self.assertEqual(grants.web_settings()["session_minutes"], 120)
+
     def test_admin_settings_are_validated(self):
         self.admin = True
         self.login()
