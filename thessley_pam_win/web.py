@@ -614,7 +614,7 @@ button.primary{background:var(--accent);border-color:var(--accent);color:#fff}bu
 .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:8px}.row form{display:inline}
 .flash{border-left:4px solid var(--ok);padding:8px 12px;margin:10px 0;background:var(--card)}
 code,.mono{font-family:ui-monospace,monospace;word-break:break-all;font-size:.85rem}
-.qr{display:block;margin:12px auto;background:#fff;padding:6px;border-radius:8px;width:min(80vw,280px);height:auto}
+.qr{display:block;margin:12px auto;background:#fff;padding:6px;border-radius:8px;width:min(92vw,520px);height:auto}
 table{width:100%;border-collapse:collapse}td{padding:6px 4px;border-bottom:1px solid var(--line);vertical-align:top;font-size:.92rem}
 .big{font-size:2rem;letter-spacing:.2rem;text-align:center;margin:10px 0}
 """
