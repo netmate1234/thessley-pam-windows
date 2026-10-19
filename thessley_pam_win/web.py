@@ -879,7 +879,7 @@ def log_page(rows: list[tuple[str, str]], who: str, page_number: int = 1, everyo
             f"recorded on this computer.</p>{pager()}<div class='card'><div class='table-wrap'><table>{body or '<tr><td class=dim>Nothing recorded yet.</td></tr>'}</table></div></div>{pager()}")
 
 
-def admin_page(viewer: Session, flash: str) -> str:
+def admin_page(viewer: Session, flash: str, listener_host: str = "") -> str:
     grace_h = grants.grace_hours()
     on = lambda flag: "on" if flag else "off"  # noqa: E731
     hidden = f'<input type="hidden" name="csrf" value="{esc(viewer.csrf)}">'
@@ -913,7 +913,10 @@ def admin_page(viewer: Session, flash: str) -> str:
                f'<input type="number" name="size" min="100000" max="10000000" step="100000" value="{settings["log_max_bytes"]}" aria-label="Maximum log file bytes"> bytes/file '
                f'<input type="number" name="count" min="1" max="20" value="{settings["log_rotations"]}" aria-label="Rotated log count"> backups '
                f'<button>Save rotation</button></form></div>')
-    web_host = "127.0.0.1" if settings["localhost_only"] else (settings["listen"] or machine.lan_ip())
+    # Show the address the live socket is actually bound to. This avoids stale or
+    # default configuration values making the help text point at loopback when
+    # the listener is serving the LAN (or vice versa).
+    web_host = "127.0.0.1" if settings["localhost_only"] else (listener_host or settings["listen"] or machine.lan_ip())
     if web_host in ("0.0.0.0", "::"):
         web_host = machine.lan_ip()
     local_only = (f'<div class="card"><strong>Admin page available only on 127.0.0.1</strong>: '
@@ -1102,7 +1105,8 @@ def make_handler(app: WebApp):
                 if not is_admin(s.user):
                     return self.html(403, "Not allowed", flash_html("Only administrators can open this page."), s)
                 flash, s.flash = s.flash, ""
-                return self.html(200, "Admin", admin_page(s, flash), s)
+                listener_host = str(app.httpd.server_address[0]) if app.httpd is not None else ""
+                return self.html(200, "Admin", admin_page(s, flash, listener_host), s)
             self.html(404, "Not found", flash_html("There is nothing here."), s)
 
         def do_POST(self):  # noqa: N802
