@@ -163,6 +163,17 @@ class WebApp:
         self.lock = threading.Lock()
         self.journal = journal or journal_lines
         self.qr = qr or qr_svg
+        self.httpd = None
+        self.rebind_requested = False
+
+    def rebind(self) -> None:
+        """Restart the listener after an administrator changes its bind address."""
+        self.rebind_requested = True
+        server = self.httpd
+        if server is not None:
+            timer = threading.Timer(1.5, server.shutdown)
+            timer.daemon = True
+            timer.start()
 
     # -- housekeeping
     def settings(self) -> dict:
@@ -378,6 +389,18 @@ class WebApp:
                 size, count = map(int, value.split(",", 1))
                 grants.set_web(log_max_bytes=size, log_rotations=count)
                 return "/admin", "Log size and rotation retention saved."
+            if name == "localhost_only":
+                local_only = value == "on"
+                grants.set_web(localhost_only=local_only)
+                self.rebind()
+                st = grants.web_settings()
+                host = "127.0.0.1" if local_only else (st["listen"] or machine.lan_ip())
+                if host in ("0.0.0.0", "::"):
+                    host = machine.lan_ip()
+                return f"https://{host}:{st['port']}/admin", (
+                    f"Admin page is now restricted to this computer at https://127.0.0.1:{st['port']}"
+                    if local_only else f"Admin page is available at https://{host}:{st['port']}."
+                )
             if name == "self_enroll":
                 grants.set_self_enroll_first(value == "on")
                 return "/admin", "Users enrolling their own first approver: " + ("on." if value == "on" else "off.")
@@ -890,6 +913,16 @@ def admin_page(viewer: Session, flash: str) -> str:
                f'<input type="number" name="size" min="100000" max="10000000" step="100000" value="{settings["log_max_bytes"]}" aria-label="Maximum log file bytes"> bytes/file '
                f'<input type="number" name="count" min="1" max="20" value="{settings["log_rotations"]}" aria-label="Rotated log count"> backups '
                f'<button>Save rotation</button></form></div>')
+    web_host = "127.0.0.1" if settings["localhost_only"] else (settings["listen"] or machine.lan_ip())
+    if web_host in ("0.0.0.0", "::"):
+        web_host = machine.lan_ip()
+    local_only = (f'<div class="card"><strong>Admin page available only on 127.0.0.1</strong>: '
+                  f'<span class="{"ok" if settings["localhost_only"] else "bad"}">{on(settings["localhost_only"])}</span>'
+                  f'<div class="dim">When on, only this computer can connect at https://127.0.0.1:{settings["port"]}/. '
+                  f'When off, it listens at https://{esc(web_host)}:{settings["port"]}/. Changing this restarts the web listener; '
+                  'turning it on disconnects browsers on other computers.</div>'
+                  f'<form method="post" action="/admin/set" class="row">{hidden}<input type="hidden" name="name" value="localhost_only">'
+                  f'<button name="value" value="{"off" if settings["localhost_only"] else "on"}">Switch {"off" if settings["localhost_only"] else "on"}</button></form></div>')
     ssh_help = ("<div class='card'><strong>SSH login path on Windows</strong>"
                 "<p>Windows OpenSSH checks the account factor first, then starts the Thessley QR approval gate. "
                 "Choose that first factor in <code>sshd_config</code>: account password, SSH key, or key followed by account password. "
@@ -902,7 +935,7 @@ def admin_page(viewer: Session, flash: str) -> str:
                 "session open while applying it. Always back up the config and run <code>sshd -t</code> before restarting.</p></div>")
     return (flash_html(flash) + "<h2>Settings for this computer</h2>"
             "<p class='dim'>Only administrators see this page. Every change asks your device for a fresh approval.</p>"
-            + ssh_help + limits + logging + grace + toggle + f"<p class='dim'>Passes held right now: {esc(len(grants.all_passes()))}.</p>")
+            + ssh_help + limits + logging + local_only + grace + toggle + f"<p class='dim'>Passes held right now: {esc(len(grants.all_passes()))}.</p>")
 
 
 # ---- HTTP ------------------------------------------------------------------------------------------------------
@@ -1185,6 +1218,9 @@ def make_handler(app: WebApp):
             elif name == "self_enroll":
                 if value not in ("on", "off"):
                     return self.html(400, "Not valid", flash_html("Choose on or off."), s)
+            elif name == "localhost_only":
+                if value not in ("on", "off"):
+                    return self.html(400, "Not valid", flash_html("Choose on or off."), s)
             else:
                 return self.html(404, "Not found", flash_html("No such setting."), s)
             self.start_change(s, f"changing a setting ({name})", app.change_setting(name, value))
@@ -1297,17 +1333,26 @@ def main() -> int:
 
 
 def serve() -> int:
-    st = grants.web_settings()
-    if not st["enabled"]:
-        print("The admin web page is switched off (sudo thessley-pam web on).")
-        return 0
-    ip = st["listen"] or machine.lan_ip()
-    cert, key = (st["cert"], st["key"]) if st["cert"] and st["key"] else default_cert_paths()
-    fingerprint = ensure_cert(cert, key, [ip, "127.0.0.1"])
-    httpd = make_server(WebApp(), ip, st["port"], cert, key)
-    print(f"Thessley admin page: https://{ip}:{st['port']}/   certificate SHA-256 {fingerprint}", flush=True)
-    try:
-        httpd.serve_forever()
-    except KeyboardInterrupt:
-        pass
+    app = WebApp()
+    while True:
+        st = grants.web_settings()
+        if not st["enabled"]:
+            print("The admin web page is switched off (thessley-pam-win web on).")
+            return 0
+        ip = "127.0.0.1" if st["localhost_only"] else (st["listen"] or machine.lan_ip())
+        cert, key = (st["cert"], st["key"]) if st["cert"] and st["key"] else default_cert_paths()
+        fingerprint = ensure_cert(cert, key, [ip, "127.0.0.1"])
+        httpd = make_server(app, ip, st["port"], cert, key)
+        app.httpd = httpd
+        app.rebind_requested = False
+        print(f"Thessley admin page: https://{ip}:{st['port']}/   certificate SHA-256 {fingerprint}", flush=True)
+        try:
+            httpd.serve_forever()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            app.httpd = None
+            httpd.server_close()
+        if not app.rebind_requested:
+            break
     return 0

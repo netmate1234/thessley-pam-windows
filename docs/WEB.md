@@ -35,6 +35,11 @@ Do these in an **administrator PowerShell**, in the repository folder, after pul
 Switch it off any time: `thessley-pam-win web off`. Other settings: `web listen ADDRESS` (default: this computer's LAN address;
 `0.0.0.0` listens everywhere, only for networks you trust), `web port N`, `web session MINUTES` (15 idle, 8 h at most).
 
+Administrators can also switch **Admin page available only on 127.0.0.1** on or off under **Admin**. When on, the listener
+accepts connections only from this Windows computer; open `https://127.0.0.1:47820/` locally, or use an SSH tunnel for
+remote access. Turning it on disconnects browsers on other computers. Turning it off restores the configured `web listen`
+address (or the computer's LAN address when set to `auto`).
+
 ## Keep the page off the network (ssh tunnel)
 
 The page can listen on this computer only, so nothing on the network can reach it, and you open it through an ssh

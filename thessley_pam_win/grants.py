@@ -94,7 +94,8 @@ def set_self_enroll_first(on: bool) -> None:
 
 
 WEB_DEFAULTS = {"enabled": False, "listen": "", "port": 47820, "session_minutes": 15, "cert": "", "key": "",
-                "max_connections": 32, "rate_limit_entries": 4096, "log_max_bytes": 1000000, "log_rotations": 5}
+                "max_connections": 32, "rate_limit_entries": 4096, "log_max_bytes": 1000000, "log_rotations": 5,
+                "localhost_only": False}
 
 
 def web_settings() -> dict:
@@ -115,6 +116,7 @@ def web_settings() -> dict:
         out["max_connections"], out["rate_limit_entries"] = WEB_DEFAULTS["max_connections"], WEB_DEFAULTS["rate_limit_entries"]
         out["log_max_bytes"], out["log_rotations"] = WEB_DEFAULTS["log_max_bytes"], WEB_DEFAULTS["log_rotations"]
     out["enabled"] = bool(out["enabled"])
+    out["localhost_only"] = bool(out["localhost_only"])
     return out
 
 
