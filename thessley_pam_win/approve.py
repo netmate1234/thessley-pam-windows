@@ -121,7 +121,6 @@ def run(username: str, rhost: str, tty: str, say: Callable[[str], None], log: Ca
             held = None
         if held:
             say(f"Thessley Passkey: approved earlier, valid for another {grants.remaining(held)}.")
-            log(f"pass used for {username} (from {rhost}, {grants.remaining(held)} left)", False)
             return True
 
     by_id = {d["credential_id"]: d for d in devices}

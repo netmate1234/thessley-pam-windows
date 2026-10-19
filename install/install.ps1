@@ -8,7 +8,7 @@
   What it does (and nothing else):
     1. checks that the Python you name sits in a folder normal users cannot write to (the service runs as SYSTEM,
        so anything it loads must be out of their reach);
-    2. installs the two libraries it needs (cryptography, qrcode) into that Python;
+    2. installs the pinned runtime libraries from requirements.lock into that Python and verifies them;
     3. copies the program to C:\ProgramData\ThessleyPamWin\app and locks the folder down (SYSTEM + Administrators
        write; everybody else may only read the program, and cannot see who is enrolled);
     4. writes gate.cmd (what sshd will run) and thessley-pam-win.cmd (the admin tool);
@@ -53,8 +53,14 @@ foreach ($p in @((Split-Path $Python), (Split-Path (Split-Path $Python)))) {
 if ($LASTEXITCODE -ne 0) { throw 'Python 3.10 or newer is needed.' }
 
 # --- 2. libraries ---------------------------------------------------------------------------------------------------
-& $Python -m pip install --quiet --disable-pip-version-check cryptography qrcode asn1crypto
-if ($LASTEXITCODE -ne 0) { throw 'pip could not install cryptography, qrcode and asn1crypto.' }
+$requirements = Join-Path $PSScriptRoot '..\requirements.lock'
+& $Python -m pip install --quiet --disable-pip-version-check --only-binary=:all: --requirement $requirements
+if ($LASTEXITCODE -ne 0) { throw 'pip could not install the pinned Thessley runtime dependencies.' }
+& $Python -m pip check
+if ($LASTEXITCODE -ne 0) { throw 'The installed Python dependencies are inconsistent.' }
+$verifyDeps = "from importlib.metadata import version; expected = {'asn1crypto':'1.5.1','cffi':'2.1.1','cryptography':'50.0.2','pycparser':'3.11','qrcode':'8.2'}; assert all(version(name) == wanted for name, wanted in expected.items())"
+& $Python -c $verifyDeps
+if ($LASTEXITCODE -ne 0) { throw 'A Thessley dependency version failed verification.' }
 
 # --- 3. program and permissions --------------------------------------------------------------------------------------
 New-Item -ItemType Directory -Force $base, $app | Out-Null

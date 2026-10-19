@@ -34,7 +34,7 @@ from .listener import SharedListener
 HOST, PORT = "127.0.0.1", 47800
 MAX_REQUEST = 2048
 MAX_ACTIVE = 8          # approvals waiting at once
-LOG_LIMIT = 1_000_000   # bytes; the log is cut when it gets larger
+_log_lock = threading.Lock()
 
 
 def log_path() -> str:
@@ -44,10 +44,27 @@ def log_path() -> str:
 def log(msg: str, warn: bool = False) -> None:
     try:
         path = log_path()
-        if os.path.exists(path) and os.path.getsize(path) > LOG_LIMIT:
-            os.replace(path, path + ".old")
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {'WARN' if warn else 'INFO'} {msg}\n")
+        with _log_lock:
+            settings = grants.web_settings()
+            log_limit = settings["log_max_bytes"]
+            rotations = settings["log_rotations"]
+            for index in range(rotations + 1, 21):
+                try:
+                    os.remove(f"{path}.{index}")
+                except FileNotFoundError:
+                    pass
+            if os.path.exists(path) and os.path.getsize(path) >= log_limit:
+                try:
+                    os.remove(f"{path}.{rotations}")
+                except FileNotFoundError:
+                    pass
+                for index in range(rotations - 1, 0, -1):
+                    source, target = f"{path}.{index}", f"{path}.{index + 1}"
+                    if os.path.exists(source):
+                        os.replace(source, target)
+                os.replace(path, path + ".1")
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {'WARN' if warn else 'INFO'} {msg}\n")
     except OSError:
         pass
 

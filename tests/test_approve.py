@@ -218,6 +218,7 @@ class PassTests(Base):
         self.assertTrue(result["ok"])
         self.assertIn("approved earlier", " ".join(self.lines))
         self.assertFalse(any(l.startswith("Link: ") for l in self.lines))
+        self.assertFalse(any("pass used" in message.lower() for message, _warn in self.logs))
 
     def test_pass_does_not_work_from_another_address(self):
         self._with_grace(4)

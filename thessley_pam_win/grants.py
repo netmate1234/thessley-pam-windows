@@ -93,7 +93,8 @@ def set_self_enroll_first(on: bool) -> None:
     _atomic_write(_config_path(), data, store.BASE)
 
 
-WEB_DEFAULTS = {"enabled": False, "listen": "", "port": 47820, "session_minutes": 15, "cert": "", "key": ""}
+WEB_DEFAULTS = {"enabled": False, "listen": "", "port": 47820, "session_minutes": 15, "cert": "", "key": "",
+                "max_connections": 32, "rate_limit_entries": 4096, "log_max_bytes": 1000000, "log_rotations": 5}
 
 
 def web_settings() -> dict:
@@ -105,8 +106,14 @@ def web_settings() -> dict:
     try:
         out["port"] = min(max(int(out["port"]), 1), 65535)
         out["session_minutes"] = min(max(int(out["session_minutes"]), 1), 240)
+        out["max_connections"] = min(max(int(out["max_connections"]), 4), 256)
+        out["rate_limit_entries"] = min(max(int(out["rate_limit_entries"]), 64), 100000)
+        out["log_max_bytes"] = min(max(int(out["log_max_bytes"]), 100000), 10000000)
+        out["log_rotations"] = min(max(int(out["log_rotations"]), 1), 20)
     except (TypeError, ValueError):
         out["port"], out["session_minutes"] = WEB_DEFAULTS["port"], WEB_DEFAULTS["session_minutes"]
+        out["max_connections"], out["rate_limit_entries"] = WEB_DEFAULTS["max_connections"], WEB_DEFAULTS["rate_limit_entries"]
+        out["log_max_bytes"], out["log_rotations"] = WEB_DEFAULTS["log_max_bytes"], WEB_DEFAULTS["log_rotations"]
     out["enabled"] = bool(out["enabled"])
     return out
 

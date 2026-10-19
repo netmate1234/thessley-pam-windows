@@ -195,6 +195,17 @@ class WebApp:
         limit, window = LOGIN_RATE
         t = now()
         with self.lock:
+            cap = grants.web_settings()["rate_limit_entries"]
+            if len(self.attempts) > cap or (len(self.attempts) >= cap and ip not in self.attempts):
+                for old_ip, times in list(self.attempts.items()):
+                    fresh = [x for x in times if t - x < window]
+                    if fresh:
+                        self.attempts[old_ip] = fresh
+                    else:
+                        self.attempts.pop(old_ip, None)
+                while len(self.attempts) > cap or (len(self.attempts) >= cap and ip not in self.attempts):
+                    oldest = min(self.attempts, key=lambda key: self.attempts[key][-1] if self.attempts[key] else 0)
+                    self.attempts.pop(oldest, None)
             hits = [x for x in self.attempts.get(ip, []) if t - x < window]
             if len(hits) >= limit:
                 self.attempts[ip] = hits
@@ -274,9 +285,9 @@ class WebApp:
                     device = stored[-1]
                     flow.label = flow.label or str(device.get("label", ""))
             flow.state = "done" if device else "failed"
-            notes = " | ".join(line.strip() for line in flow.lines if line.strip())[-300:]
+            # Flow output contains the temporary enrollment URI and pairing code.
             self.log(f"web page: adding a device for {user} (asked by {flow.owner}): {flow.state}"
-                     + (f" ({device.get('credential_id', '')})" if device else "") + f" [{notes}]", False)
+                     + (f" ({device.get('credential_id', '')})" if device else ""), False)
 
         threading.Thread(target=work, daemon=True).start()
         return flow
@@ -359,6 +370,14 @@ class WebApp:
             if name == "session":
                 grants.set_web(session_minutes=int(float(value)))
                 return "/admin", f"You are now signed out after {int(float(value))} minutes without activity (from the next sign-in)."
+            if name == "web_limits":
+                connections, buckets = map(int, value.split(",", 1))
+                grants.set_web(max_connections=connections, rate_limit_entries=buckets)
+                return "/admin", "Web connection and rate-limit memory limits saved."
+            if name == "log_limits":
+                size, count = map(int, value.split(",", 1))
+                grants.set_web(log_max_bytes=size, log_rotations=count)
+                return "/admin", "Log size and rotation retention saved."
             if name == "self_enroll":
                 grants.set_self_enroll_first(value == "on")
                 return "/admin", "Users enrolling their own first approver: " + ("on." if value == "on" else "off.")
@@ -541,10 +560,13 @@ def qr_svg(link: str) -> bytes:
 
 
 def journal_lines() -> list[str]:
-    """The service's own log (C:\\ProgramData\\ThessleyPamWin\\service.log, and the one before it)."""
+    """The service log and its bounded rotated files."""
     out: list[str] = []
     base = os.path.join(store.BASE, "service.log")
-    for path in (base + ".old", base):
+    # Read newest first across the current file and bounded rotations.
+    rotations = grants.web_settings()["log_rotations"]
+    paths = [base + f".{i}" for i in range(rotations, 0, -1)] + [base + ".old", base]
+    for path in paths:
         try:
             with open(path, encoding="utf-8", errors="replace") as f:
                 out.extend(f.read().splitlines())
@@ -565,8 +587,6 @@ ACTIVITY = (
      lambda m: f"No answer in time for {m['user']} (from {m['rhost']}): refused"),
     (re.compile(r"pass granted to (?P<user>\S+) \(from (?P<ip>[^,]+), (?P<h>[\d.]+) h"),
      lambda m: f"Pass granted to {m['user']} from {m['ip']} for {m['h']} h"),
-    (re.compile(r"pass used for (?P<user>\S+) \(from (?P<ip>[^,]+),"),
-     lambda m: f"Pass used by {m['user']} from {m['ip']}"),
     (re.compile(r"no approver for (?P<user>[^;]+); refused"),
      lambda m: f"Refused {m['user']}: no approver enrolled"),
     (re.compile(r"enrolled '(?P<label>.*?)' (?P<cred>c_\w+) for (?P<user>\S+)"),
@@ -850,11 +870,26 @@ def admin_page(viewer: Session, flash: str) -> str:
               f'<form method="post" action="/admin/set" class="row">{hidden}<input type="hidden" name="name" value="self_enroll">'
               f'<button name="value" value="{"off" if first else "on"}">Switch {"off" if first else "on"}</button></form></div>')
     session = grants.web_settings()["session_minutes"]
+    settings = grants.web_settings()
     grace += (f'<div class="card"><strong>Stay signed in to this page</strong>: {session} minutes without activity'
               f'<div class="dim">After this long without clicking anything you are signed out (always after 8 hours). '
               f'Applies from the next sign-in. 1 to 240 minutes.</div>'
               f'<form method="post" action="/admin/set" class="row">{hidden}<input type="hidden" name="name" value="session">'
               f'<input type="text" name="value" value="{session}" style="width:6rem"> minutes <button>Change</button></form></div>')
+    limits = (f'<div class="card"><strong>Web service resource limits</strong>'
+              f'<div class="dim">Limits are enforced immediately. Current: {settings["max_connections"]} concurrent connections and '
+              f'{settings["rate_limit_entries"]} remembered IP buckets; old buckets expire or are evicted at capacity.</div>'
+              f'<form method="post" action="/admin/set" class="row">{hidden}<input type="hidden" name="name" value="web_limits">'
+              f'<input type="number" name="connections" min="4" max="256" value="{settings["max_connections"]}" aria-label="Maximum concurrent connections"> connections '
+              f'<input type="number" name="buckets" min="64" max="100000" value="{settings["rate_limit_entries"]}" aria-label="Rate limit entries"> IP buckets '
+              f'<button>Save limits</button></form></div>')
+    logging = (f'<div class="card"><strong>Log rotation</strong><div class="dim">Each file is capped at {settings["log_max_bytes"] // 1000} KB; '
+               f'keep {settings["log_rotations"]} rotated files plus the current log. Approximate maximum: '
+               f'{(settings["log_max_bytes"] * (settings["log_rotations"] + 1)) // 1000000} MB.</div>'
+               f'<form method="post" action="/admin/set" class="row">{hidden}<input type="hidden" name="name" value="log_limits">'
+               f'<input type="number" name="size" min="100000" max="10000000" step="100000" value="{settings["log_max_bytes"]}" aria-label="Maximum log file bytes"> bytes/file '
+               f'<input type="number" name="count" min="1" max="20" value="{settings["log_rotations"]}" aria-label="Rotated log count"> backups '
+               f'<button>Save rotation</button></form></div>')
     ssh_help = ("<div class='card'><strong>SSH login path on Windows</strong>"
                 "<p>Windows OpenSSH checks the account factor first, then starts the Thessley QR approval gate. "
                 "Choose that first factor in <code>sshd_config</code>: account password, SSH key, or key followed by account password. "
@@ -867,7 +902,7 @@ def admin_page(viewer: Session, flash: str) -> str:
                 "session open while applying it. Always back up the config and run <code>sshd -t</code> before restarting.</p></div>")
     return (flash_html(flash) + "<h2>Settings for this computer</h2>"
             "<p class='dim'>Only administrators see this page. Every change asks your device for a fresh approval.</p>"
-            + ssh_help + grace + toggle + f"<p class='dim'>Passes held right now: {esc(len(grants.all_passes()))}.</p>")
+            + ssh_help + limits + logging + grace + toggle + f"<p class='dim'>Passes held right now: {esc(len(grants.all_passes()))}.</p>")
 
 
 # ---- HTTP ------------------------------------------------------------------------------------------------------
@@ -1137,6 +1172,16 @@ def make_handler(app: WebApp):
                     minutes = -1
                 if not 1 <= minutes <= 240:
                     return self.html(400, "Not valid", flash_html("Give a number of minutes from 1 to 240."), s)
+            elif name in ("web_limits", "log_limits"):
+                try:
+                    first = int(data.get("connections" if name == "web_limits" else "size", ""))
+                    second = int(data.get("buckets" if name == "web_limits" else "count", ""))
+                except ValueError:
+                    first, second = 0, 0
+                valid = (4 <= first <= 256 and 64 <= second <= 100000) if name == "web_limits" else (100000 <= first <= 10000000 and 1 <= second <= 20)
+                if not valid:
+                    return self.html(400, "Not valid", flash_html("Check the resource or rotation values."), s)
+                value = f"{first},{second}"
             elif name == "self_enroll":
                 if value not in ("on", "off"):
                     return self.html(400, "Not valid", flash_html("Choose on or off."), s)
@@ -1197,6 +1242,37 @@ class Server(ThreadingHTTPServer):
     # serves, and share or take over its connections. Bind exclusively, as listener.py does.
     allow_reuse_address = False
 
+    def __init__(self, *args, **kwargs):
+        self._worker_lock = threading.Lock()
+        self._active_workers = 0
+        super().__init__(*args, **kwargs)
+
+    def get_request(self):
+        request, address = super().get_request()
+        request.settimeout(10)
+        return request, address
+
+    def process_request(self, request, client_address):
+        with self._worker_lock:
+            if self._active_workers >= grants.web_settings()["max_connections"]:
+                # Do not perform a TLS handshake in the accept loop for rejected work.
+                self.shutdown_request(request)
+                return
+            self._active_workers += 1
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            with self._worker_lock:
+                self._active_workers -= 1
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            with self._worker_lock:
+                self._active_workers -= 1
+
     def server_bind(self):
         if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
@@ -1211,7 +1287,7 @@ def make_server(app: WebApp, ip: str, port: int, cert: str, key: str) -> Server:
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     ctx.load_cert_chain(cert, key)
     httpd = Server((ip, port), make_handler(app))
-    httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
+    httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True, do_handshake_on_connect=False)
     return httpd
 
 

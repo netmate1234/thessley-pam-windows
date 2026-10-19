@@ -73,7 +73,8 @@ the window short; `thessley-pam-win end-pass` ends passes at once. Turned off by
 
        powershell -ExecutionPolicy Bypass -File install\install.ps1 -Python "C:\Program Files\Python313\python.exe" -OpenFirewall
 
-   It refuses a Python that normal users can write to, installs `cryptography` and `qrcode` into it, copies the program to
+   It refuses a Python that normal users can write to, installs the pinned dependencies from `requirements.lock` and verifies
+   their versions and dependency consistency, copies the program to
    `C:\ProgramData\ThessleyPamWin`, closes the data folders to normal users, creates the scheduled task that runs the
    service as SYSTEM at boot, and starts it. `-OpenFirewall` adds one rule: TCP 47810-47819 from the local subnet, Private
    networks only, for that Python. It never touches `sshd_config`, accounts or groups.
@@ -282,11 +283,11 @@ clear yes.
   LAN was accepted, the QR code and link were shown, and `service.log` recorded `approved by '<phone>' ... for <user>`.
   The approval came from the phone, over the pinned-certificate listener, not from the ssh client.
 - **Key instead of password** works: with the `publickey` block, `sshd` accepted the account's ed25519 key and the gate then
-  ran (`service.log`: `pass used for <user> ...`, no new approval needed inside the pass window). A fresh key login that
+  ran without a new approval inside the pass window. Pass reuse is not written to `service.log`. A fresh key login that
   needs a new approval was not separately exercised, but it takes the same gate path.
 - **Passes** work with a real `sshd`. After `grace --hours 4`, the first approval wrote `pass granted to <user> (from
-  <address>, 4 h)`, and the next login from the same address went straight in, with no QR code: `pass used for <user>
-  (from <address>, 3 h 59 min left)`.
+  <address>, 4 h)`, and the next login from the same address went straight in, with no QR code. Reuse is intentionally not
+  logged.
 
 - **Enrolling without an administrator** works with real devices. A normal user (not an administrator) ran `enroll`; the
   service asked for an approval to add a device, the phone approved it (`approved by '<phone>' ... (from -)`), and the
