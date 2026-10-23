@@ -39,20 +39,24 @@ bool g_answer_received = false;
 std::string g_answer;
 
 void layout_viewer(HWND hwnd) {
-    if (!g_viewer_only || !g_status || !g_qr) return;
+    if (!g_viewer_only || !g_logo || !g_status || !g_qr) return;
     RECT client{};
     GetClientRect(hwnd, &client);
     const int width = client.right - client.left;
     const int height = client.bottom - client.top;
     const int margin = std::max(8, std::min(16, width / 24));
-    const int statusHeight = std::max(30, std::min(44, height / 12));
+    const int statusHeight = 44;
     const int statusY = margin;
     const int qrTop = statusY + statusHeight + margin;
     const int availableWidth = std::max(1, width - margin * 2);
     const int availableHeight = std::max(1, height - qrTop - margin);
     const int side = std::min(availableWidth, availableHeight);
     const int qrX = (width - side) / 2;
-    MoveWindow(g_status, margin, statusY, std::max(1, width - margin * 2), statusHeight, TRUE);
+    constexpr int logoSide = 32;
+    constexpr int logoGap = 8;
+    const int statusX = margin + logoSide + logoGap;
+    MoveWindow(g_logo, margin, statusY + (statusHeight - logoSide) / 2, logoSide, logoSide, TRUE);
+    MoveWindow(g_status, statusX, statusY, std::max(1, width - statusX - margin), statusHeight, TRUE);
     MoveWindow(g_qr, qrX, qrTop, side, side, TRUE);
     // The QR surface paints directly from g_matrix. Force a fresh paint after
     // every layout change so the symbol follows the viewer's current size.
@@ -285,6 +289,14 @@ LRESULT CALLBACK qr_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
 LRESULT CALLBACK main_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
+    case WM_CTLCOLORSTATIC:
+        if (g_viewer_only && (HWND)lp == g_status) {
+            HDC dc = (HDC)wp;
+            SetBkColor(dc, RGB(255, 255, 255));
+            SetTextColor(dc, RGB(32, 32, 32));
+            return (LRESULT)GetStockObject(WHITE_BRUSH);
+        }
+        break;
     case WM_SIZE:
         if (g_viewer_only) {
             layout_viewer(hwnd);
@@ -309,7 +321,7 @@ LRESULT CALLBACK main_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_logo = CreateWindowW(L"STATIC", L"", WS_CHILD|WS_VISIBLE|SS_BITMAP, 14, 12, 32, 32, hwnd, nullptr, nullptr, nullptr);
             SendMessageW(g_logo, STM_SETIMAGE, IMAGE_BITMAP,
                          (LPARAM)LoadBitmapW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDB_BRAND_IMAGE)));
-            g_status = CreateWindowW(L"STATIC", L"Scan this QR code with Thessley Passkey.", WS_CHILD|WS_VISIBLE|SS_LEFT|SS_CENTERIMAGE, 54, 10, 420, 36, hwnd, nullptr, nullptr, nullptr);
+            g_status = CreateWindowW(L"STATIC", L"Scan this QR code with Thessley Passkey.", WS_CHILD|WS_VISIBLE|SS_LEFT|SS_CENTERIMAGE|SS_EDITCONTROL, 54, 10, 420, 44, hwnd, nullptr, nullptr, nullptr);
             g_qr = CreateWindowW(L"ThessleyQrSurface", L"", WS_CHILD|WS_VISIBLE, 15, 50, 450, 450, hwnd, nullptr, nullptr, nullptr);
             SendMessageW(g_status, WM_SETFONT, (WPARAM)g_font, TRUE);
             layout_viewer(hwnd);

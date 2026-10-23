@@ -28,8 +28,9 @@ The provider build also compiles `windows-logon-test/ThessleySignInTest.cpp` as
 `windows-logon-provider/build/ThessleyQrViewer.exe`. The secure sign-in desktop uses this separate
 native window to render the QR code. The viewer can be resized or maximized; it redraws from the
 complete QR matrix at each new size, maps every module edge into the available square, and rejects
-incomplete or malformed matrices instead of displaying a partial symbol. This update changes only
-QR rendering, not provider registration, saved credentials, account policy, or PIN/password recovery
+incomplete or malformed matrices instead of displaying a partial symbol. The status header is white,
+with the logo and status text laid out separately so they do not overlap. This update changes only the
+viewer UI, not provider registration, saved credentials, account policy, or PIN/password recovery
 tiles.
 
 `install-with-rollback.ps1` is for a first install: it registers the Thessley provider and schedules `rollback.ps1` to remove only its registration after ten minutes by default. For an existing install, use `update-with-rollback.ps1`; it keeps the current provider DLL and QR viewer, schedules their restoration, and then switches to the new version. If correcting the files while that timer is already active, `refresh-existing-rollback.ps1` updates the files and leaves the current rollback untouched. After reaching the desktop and confirming QR sign-in, an administrator can run the installed `confirm.ps1` to cancel the timer. The built-in Windows PIN and password providers remain separate recovery choices. The provider writes lifecycle and enumeration results to `C:\ProgramData\ThessleyPamWin\credential-provider\provider.log`; it does not log usernames, passwords, QR payloads, or approval data. Do not cancel a rollback timer until a real sign-in has succeeded.
