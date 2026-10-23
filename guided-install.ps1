@@ -81,7 +81,7 @@ if (-not $cloudAccess -and ($openApprovalFirewall -or $openWebFirewall)) {
     $defaultVpnSubnets = '10.8.0.0/24,10.8.1.0/24'
     $cidrPattern = '^(?:(?:25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])/(?:[0-9]|[12][0-9]|3[0-2])$'
     while ($true) {
-        $choice = Read-Host "Allow phone approvals and the web GUI from VPN ranges $defaultVpnSubnets? [Y/n/custom]"
+        $choice = Read-Host "Also allow phone approvals and the web GUI from VPN ranges $defaultVpnSubnets? Local networks remain allowed. [Y/n/custom]"
         if ([string]::IsNullOrWhiteSpace($choice) -or $choice -match '^(y|yes)$') {
             $vpnClientSubnets = $defaultVpnSubnets
             break
@@ -109,7 +109,7 @@ if ($openApprovalFirewall) { $arguments.OpenFirewall = $true }
 if ($openWebFirewall) { $arguments.OpenWebFirewall = $true }
 if ($cloudAccess) { $arguments.CloudAccess = $true }
 if ($openSshFirewall) { $arguments.OpenSshFirewall = $true }
-if ($vpnClientSubnets) { $arguments.VpnClientSubnets = $vpnClientSubnets }
+$arguments.VpnClientSubnets = $vpnClientSubnets
 & $install @arguments
 
 $cli = Join-Path $env:ProgramData 'ThessleyPamWin\thessley-pam-win.cmd'

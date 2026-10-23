@@ -26,7 +26,7 @@ param(
     [switch]$OpenWebFirewall,   # also allow the admin web page's port (47820) from the local subnet
     [switch]$CloudAccess,        # use RemoteAddress Any for the Thessley listeners
     [switch]$OpenSshFirewall,    # add a separate TCP 22 rule; only valid with CloudAccess
-    [string]$VpnClientSubnets = '',
+    [string]$VpnClientSubnets = '10.8.0.0/24,10.8.1.0/24',
     [ValidateSet('Private', 'Any')][string]$FirewallProfile = 'Any'   # local-subnet-only rules also work when Windows calls the network Public
 )
 $ErrorActionPreference = 'Stop'
