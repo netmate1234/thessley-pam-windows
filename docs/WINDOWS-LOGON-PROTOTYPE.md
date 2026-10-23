@@ -124,4 +124,4 @@ available, test QR sign-in, and confirm the rollback only after sign-in succeeds
 present, understand its pending action before starting another install. Phone enrollment is needed to complete QR
 sign-in setup, but it does not control whether the tile appears.
 
-The October 19, 2026 branding update changed the credential-tile bitmap and the QR viewer's in-window and title-bar icons. The icon assets are composited onto white so transparent rounded corners do not appear gray.
+The October 23, 2026 branding update gives the credential tile and QR viewer genuine alpha transparency in the rounded corners. The tile loads its 32-bit bitmap as a DIB section so Windows retains the alpha channel; the viewer uses the matching multi-size Thessley ICO.

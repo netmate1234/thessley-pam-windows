@@ -7,7 +7,21 @@ It is the Windows counterpart of `thessley-pam-linux` and speaks the same protoc
 apps work. Windows OpenSSH has no PAM, so the approval runs as a `ForceCommand` right after the password; a small service
 running as SYSTEM keeps the approvers and passes where a logged-in user cannot change them.
 
-Read [docs/SSH.md](docs/SSH.md) first: it explains the design, the limits, the setup and what has and has not been tested.
+Read [docs/SSH.md](docs/SSH.md) first: it explains the design, limits, remote SSH installation, phone enrollment, timed rollback,
+and what has and has not been tested.
+
+For a guided Windows 11 setup, extract this ZIP and run `guided-install.ps1` from an **Administrator PowerShell**. It
+installs the core service and offers the optional web page, firewall rules, per-user SSH QR gate, and experimental
+Windows QR sign-in tile. SSH setup backs up and validates `sshd_config` and arms an automatic rollback; the sign-in
+tile has its own rollback. Keep a working SSH session and Windows PIN/password recovery available, then confirm only
+after testing every selected login method with `C:\ProgramData\ThessleyPamWin\confirm-setup.ps1`. Python 3.10+ for all
+users is required; if it is missing, the wizard offers to install Python 3.13 with winget. It detects a missing
+OpenSSH service and stops before changing SSH policy.
+
+You can also install over an existing SSH connection. First install and test Windows OpenSSH independently, then connect
+with an interactive PowerShell session and confirm it has an administrator token. Use the hosted one-line bootstrap or
+transfer this package and run `guided-install.ps1`. Enroll and verify the phone first; keep the current SSH session open
+while the wizard applies and tests the SSH gate.
 
 | Piece | What it does |
 |---|---|

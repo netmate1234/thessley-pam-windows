@@ -64,9 +64,16 @@ if ($LASTEXITCODE -ne 0) { throw 'A Thessley dependency version failed verificat
 
 # --- 3. program and permissions --------------------------------------------------------------------------------------
 New-Item -ItemType Directory -Force $base, $app | Out-Null
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'confirm-setup.ps1') -Destination (Join-Path $base 'confirm-setup.ps1') -Force
 Remove-Item -Recurse -Force (Join-Path $app 'thessley_pam_win') -ErrorAction SilentlyContinue
 Copy-Item -Recurse -Force (Join-Path $repo 'thessley_pam_win') $app
 Get-ChildItem (Join-Path $app 'thessley_pam_win') -Recurse -Directory -Filter '__pycache__' | Remove-Item -Recurse -Force
+$downloadSource = Join-Path $repo 'downloads'
+$downloadTarget = Join-Path $base 'downloads'
+New-Item -ItemType Directory -Force $downloadTarget | Out-Null
+if (Test-Path $downloadSource) {
+    Copy-Item -Path (Join-Path $downloadSource '*') -Destination $downloadTarget -Force
+}
 
 foreach ($entry in @(@('daemon_main.py', 'daemon'), @('gate_main.py', 'gate'), @('cli_main.py', 'cli'), @('web_main.py', 'web'))) {
     @"
@@ -100,8 +107,10 @@ Stop-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue
 Unregister-ScheduledTask -TaskName $task -Confirm:$false -ErrorAction SilentlyContinue
 $action    = New-ScheduledTaskAction -Execute $Python -Argument "-I -X utf8 `"$app\daemon_main.py`""
 $trigger   = New-ScheduledTaskTrigger -AtStartup
+# Start immediately. The daemon waits for a usable LAN address before binding the approval listener,
+# while the lock-screen provider retries its local connection during service startup.
 $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-$settings  = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 5 -RestartInterval (New-TimeSpan -Minutes 1) -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew
+$settings  = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 30 -RestartInterval (New-TimeSpan -Minutes 1) -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew
 Register-ScheduledTask -TaskName $task -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description 'Thessley Passkey approvals for ssh logins' | Out-Null
 Start-ScheduledTask -TaskName $task
 
@@ -120,9 +129,9 @@ Start-Sleep -Seconds 3
 # --- 5. optional firewall rule for the phone/app to reach the approval window --------------------------------------------
 if ($OpenFirewall) {
     Remove-NetFirewallRule -DisplayName 'Thessley Passkey approvals' -ErrorAction SilentlyContinue
-    New-NetFirewallRule -DisplayName 'Thessley Passkey approvals' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 47810-47819 `
+    New-NetFirewallRule -DisplayName 'Thessley Passkey approvals' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 47810 `
         -Program $Python -Profile $FirewallProfile -RemoteAddress LocalSubnet | Out-Null
-    Write-Host "Firewall: allowed TCP 47810-47819 from the local subnet ($FirewallProfile networks)."
+    Write-Host "Firewall: allowed TCP 47810 from the local subnet ($FirewallProfile networks)."
 }
 
 if ($OpenWebFirewall) {
@@ -140,7 +149,7 @@ Installed. Next steps (nothing below has been done for you):
 
   1. Add an approver for your Windows account (phone, or the desktop app):
        & '$cli' enroll --user YOURNAME
-  2. Allow the phone to reach this computer while a login waits (TCP 47810-47819, same Wi-Fi). Either re-run this
+  2. Allow the phone to reach this computer while a login waits (TCP 47810, same Wi-Fi). Either re-run this
      script with -OpenFirewall, or add your own rule. A phone on a network Windows calls "Public" will not get through.
   3. Print the sshd_config lines for your account:
        & '$cli' sshd-config --user YOURNAME

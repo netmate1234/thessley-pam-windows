@@ -14,7 +14,7 @@ Windows OpenSSH has no PAM, so the approval cannot sit inside the authentication
 
 1. `sshd` checks the first factor: the password (`AuthenticationMethods password`) or the ssh key (`publickey`). A wrong password
    or an unknown key never gets further.
-2. For the chosen account, `sshd_config` has `ForceCommand gate.cmd`. `sshd` starts the **gate** instead of the user's shell.
+2. For the chosen account, `sshd_config` has a `ForceCommand` that launches Python directly. `sshd` starts the **gate** instead of the user's shell. Direct launch lets Ctrl+C end a pending approval without the extra Windows batch confirmation prompt.
 3. The gate (runs as the user, standard library only) asks the **approval service** over `127.0.0.1:47800`, prints what the
    service says (the link and the QR code) into the ssh terminal, and waits.
 4. The service (runs as **SYSTEM**) registers the request with its shared HTTPS listener on TCP 47810. The listener uses a
@@ -62,6 +62,78 @@ the window short; `thessley-pam-win end-pass` ends passes at once. Turned off by
 
 ## Setup
 
+### Install Windows OpenSSH Server first
+
+Open an **administrator PowerShell**. Install the Windows OpenSSH Server capability if it is not already installed,
+then configure its service to start automatically:
+
+    $cap = Get-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
+    if ($cap.State -ne 'Installed') {
+        Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
+    }
+    Set-Service -Name sshd -StartupType Automatic
+    Start-Service sshd
+    Get-Service sshd
+
+If `Get-WindowsCapability` reports `Installed` but `Get-Service sshd` says the service does not exist, stop here: the
+Windows optional feature is inconsistent. Back up `C:\ProgramData\ssh` if it exists, remove only the OpenSSH Server
+capability, restart Windows, then run the installation commands again from Administrator PowerShell:
+
+    Remove-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
+    Restart-Computer
+
+Windows normally creates the `OpenSSH-Server-In-TCP` firewall rule during feature installation. Restrict it to the
+local subnet (the default Windows rule may be broader):
+
+    $rule = Get-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -ErrorAction SilentlyContinue
+    if ($rule) {
+        Set-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -Enabled True -RemoteAddress LocalSubnet
+    } else {
+        New-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -DisplayName 'OpenSSH Server (sshd)' `
+            -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 -RemoteAddress LocalSubnet
+    }
+
+This limits access by source address even when Windows marks the active network Public. If SSH must also be reachable
+over a VPN, include only that VPN client subnet in the rule's remote-address scope. Verify a normal
+SSH login works before adding Thessley's account-specific `Match` block. The Thessley installer's `-OpenFirewall` switch
+only opens its phone approval listener on TCP 47810; it does not open SSH port 22. See Microsoft's
+[OpenSSH Server installation guide](https://learn.microsoft.com/en-us/windows-server/administration/openssh/openssh_install_firstuse?pivots=windows-11).
+
+**Keep OpenSSH setup separate from Thessley setup.** Install and verify `sshd` first from the Windows console. This gives
+you a working remote shell before installing the approval service. Do not change `sshd_config` as part of the initial
+remote install. Use a stable LAN or VPN address, and keep an existing SSH session open throughout the later gate setup.
+
+To install Thessley remotely, connect from a trusted computer using a Windows account that is an administrator:
+
+    ssh -t WINDOWS_ADMIN@WINDOWS_IP powershell.exe -NoProfile
+
+At the PowerShell prompt, check whether this SSH session has an administrator token:
+
+    ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+
+Continue only if it prints `True`. If it prints `False`, stop: membership in the Administrators group is not enough if
+the SSH session does not have an elevated token. Do not try to work around this by weakening UAC or enabling broad
+remote-management access. Run the installer locally from Administrator PowerShell instead.
+
+The remote shell must stay interactive for the installer's prompts. Run the guided bootstrap:
+
+    irm https://wp-opsec.eagleeye-intelligence.com/wp-content/uploads/thessley-windows-downloads/install.ps1 | iex
+
+The installer is interactive and needs administrator rights to install the machine-wide Python runtime and Windows service.
+If prompted to install Python, allow the machine-wide installation and wait for it to finish. If the installer reports that
+PowerShell is not elevated, close the SSH session and run it from Administrator PowerShell at the Windows console. Do not
+disable UAC, enable broad remote administration, or expose SSH to the public internet to work around a filtered token.
+
+The guided installer can optionally configure the QR gate for one SSH account. It backs up `sshd_config`, validates both
+the file and effective per-account settings, restarts `sshd`, and schedules automatic restore. Keep the current SSH session
+open and test a second login. The same installer can optionally stage the experimental Windows QR sign-in tile; that
+change also has a rollback timer. Keep PIN/password recovery available and run the installed `confirm-setup.ps1` only
+after each selected login method succeeds.
+
+When installing from a downloaded ZIP instead of the hosted bootstrap, transfer and extract it first, then run the package's
+`guided-install.ps1` in the elevated interactive PowerShell session. Do not run the hosted bootstrap and the manual package
+installer as two separate installs.
+
 1. **Python for all users** (the service runs as SYSTEM and must not load code a normal user can change):
 
        winget install --id Python.Python.3.13 --scope machine
@@ -76,22 +148,54 @@ the window short; `thessley-pam-win end-pass` ends passes at once. Turned off by
    It refuses a Python that normal users can write to, installs the pinned dependencies from `requirements.lock` and verifies
    their versions and dependency consistency, copies the program to
    `C:\ProgramData\ThessleyPamWin`, closes the data folders to normal users, creates the scheduled task that runs the
-   service as SYSTEM at boot, and starts it. `-OpenFirewall` adds one rule: TCP 47810-47819 from the local subnet, Private
-   networks only, for that Python. It never touches `sshd_config`, accounts or groups.
+   service as SYSTEM at boot, and starts it. It never touches `sshd_config`, accounts or groups.
+
+   **Firewall note:** the installer option `-OpenFirewall` opens TCP 47810 from the local subnet on Private networks.
+   Standalone enrollment can use another port in the 47810–47819 range when the shared listener already occupies 47810.
+   Before enrollment, add this narrowly scoped inbound rule from an elevated PowerShell if your firewall blocks that
+   dynamic port:
+
+       New-NetFirewallRule -DisplayName 'Thessley phone approval and enrollment' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 47810-47819 -RemoteAddress LocalSubnet -Profile Any
+
+   This rule is limited to local-subnet sources, including when Windows classifies the network as Public. If you need
+   phone enrollment or approvals over a VPN, include the specific VPN client subnet in `-RemoteAddress`; do not use `Any`
+   for remote addresses. Remove the earlier Thessley TCP 47810 rule if it duplicates this rule.
 
 3. **Enrol an approver.** An administrator can do it as below; users can also enrol themselves, without administrator rights
    (see "Enrolling without an administrator"). Administrator terminal (see "Second approver" for the desktop app):
 
        & "C:\ProgramData\ThessleyPamWin\thessley-pam-win.cmd" enroll --user YOURNAME
 
-   Scan the QR code with the phone app, or paste the link into the desktop app, compare the 6-digit code on both screens
-   and type `yes`.
+   Scan the QR code with the phone app, or paste the link into the desktop app. Compare the six-digit pairing code shown
+   by the terminal and phone; confirm only when they match, then type `yes` in the terminal. Keep the SSH window open
+   until enrollment reports success.
 
-4. **Edit `C:\ProgramData\ssh\sshd_config`.** The tool prints the exact lines:
+4. **Enable the SSH gate only after enrollment works.** First create a backup and a five-minute automatic rollback in an
+   elevated PowerShell. This restores the original SSH configuration and restarts `sshd` if you lose your session:
+
+       $config = 'C:\ProgramData\ssh\sshd_config'
+       $backup = "$config.thessley-$(Get-Date -Format yyyyMMdd-HHmmss).bak"
+       Copy-Item -LiteralPath $config -Destination $backup
+       $rollback = 'C:\ProgramData\ssh\thessley-rollback.ps1'
+       @"
+       Copy-Item -LiteralPath '$backup' -Destination '$config' -Force
+       Restart-Service sshd -Force
+       "@ | Set-Content -LiteralPath $rollback -Encoding UTF8
+       $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument '-NoProfile -ExecutionPolicy Bypass -File C:\ProgramData\ssh\thessley-rollback.ps1'
+       $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(5)
+       Register-ScheduledTask -TaskName 'ThessleySSHConfigRollback' -Action $action -Trigger $trigger -User SYSTEM -RunLevel Highest -Force
+
+   The rollback task is a safety net, not a substitute for keeping your existing SSH connection open. If anything fails,
+   leave the timer in place and wait for the original configuration to be restored.
+
+   Now generate the exact account-specific configuration block:
 
        & "C:\ProgramData\ThessleyPamWin\thessley-pam-win.cmd" sshd-config --user YOURNAME
 
-   They go at the **end** of the file (a `Match` block must be last):
+   Back up `sshd_config` before editing. Place the generated `Match User` block after the global settings and in the right
+   position relative to existing `Match` blocks. For an administrator account, put it before the stock
+   `Match Group administrators` block so the generated account-specific settings take effect. Do not replace the whole
+   configuration file. The default password-first block looks like this:
 
        Match User YOURNAME
            PasswordAuthentication yes
@@ -103,24 +207,24 @@ the window short; `thessley-pam-win end-pass` ends passes at once. Turned off by
            X11Forwarding no
            PermitTunnel no
            PermitTTY yes
-           ForceCommand C:\ProgramData\ThessleyPamWin\gate.cmd
+           ForceCommand "C:\Program Files\Python313\python.exe" -I -X utf8 "C:\ProgramData\ThessleyPamWin\app\gate_main.py"
 
    Then, always in this order (administrator):
 
        & "C:\Program Files\OpenSSH\sshd.exe" -t        # refuses to continue if the config is invalid
        Restart-Service sshd
 
-   Keep one working session open while you try a new login, and keep a copy of `sshd_config`.
-   The command prints a password-first block by default. Select the first factor explicitly with
+   Keep the original SSH session open. The command prints a password-first block by default. Select the first factor explicitly with
    `sshd-config --user YOURNAME --factor password|key|key-password`. Keep one working session open, back up the file,
    validate with `sshd -t`, and only then restart the service.
 
-   If `YOURNAME` is an **administrator**, the stock `Match Group administrators` block at the end of the file also
-   applies. Put your `Match User` block **above** it (sshd uses the first value it finds for each setting).
+   If `YOURNAME` is an **administrator**, the stock `Match Group administrators` block also applies. Ensure the generated
+   user block is evaluated first for the settings it defines; inspect the effective configuration with
+   `sshd.exe -T -C user=YOURNAME,host=localhost,addr=127.0.0.1` if the file has other `Match` rules.
 
 **Select the first factor**
 
-Windows OpenSSH authenticates the account before it starts `gate.cmd`; the gate then asks for phone approval. Pick one
+Windows OpenSSH authenticates the account before it starts the Python gate; the gate then asks for phone approval. Pick one
 of these first-factor choices when generating the `Match User` block:
 
 - `--factor password`: account password, then phone approval. SSH keys are disabled for this account.
@@ -139,7 +243,7 @@ The key-only block looks like this:
         X11Forwarding no
         PermitTunnel no
         PermitTTY yes
-        ForceCommand C:\ProgramData\ThessleyPamWin\gate.cmd
+        ForceCommand "C:\Program Files\Python313\python.exe" -I -X utf8 "C:\ProgramData\ThessleyPamWin\app\gate_main.py"
 
 The password is then not accepted at all for that account. The strictest option requires a key and **then** password
 before phone approval; generate it with `--factor key-password`.
@@ -158,8 +262,8 @@ On Windows the key must be where `sshd` looks, with permissions it accepts, or i
 
 If the key is lost, nobody can log in to that account over ssh. Keep a second way in (another account, or the console).
 
-5. **Firewall for ssh itself** (port 22) is a separate matter and not touched here. The OpenSSH installer's rule covers
-   Private networks only.
+5. **Firewall for ssh itself** (port 22) is separate and not touched by Thessley. Keep the OpenSSH rule limited to the
+   LAN or VPN client subnet.
 
 6. **Optional: passes.** Off by default, so every login asks. To let one approval count for 4 hours from the same address
    (administrator):
@@ -174,7 +278,7 @@ If the key is lost, nobody can log in to that account over ssh. Keep a second wa
    changes nothing. The pass is created by the next approval *after* you set this; in same-IP mode, a login from another
    address asks again.
 
-7. Log in from another computer:
+7. From a second computer, start a fresh SSH connection while the original session and rollback timer are still active:
 
        ssh YOURNAME@this-computer
        (password)
@@ -182,6 +286,15 @@ If the key is lost, nobody can log in to that account over ssh. Keep a second wa
        Link: thessleypam://sudo?...
        <QR code>
        (approve on the phone, or:  thessley-passkey respond 'thessleypam://sudo?...' --approve )
+
+   Confirm that the QR/link appears, approve it on the phone, and that the expected shell opens. If you configured a
+   four-hour pass, make a second connection from the same client address and confirm that it skips approval. Only after
+   these checks succeed, cancel automatic rollback from the administrator session:
+
+       Unregister-ScheduledTask -TaskName 'ThessleySSHConfigRollback' -Confirm:$false
+
+   If you cannot confirm the fresh login, do not cancel the task. Wait for rollback, or restore the backup manually from
+   the working session and restart `sshd`.
 
 ## Second approver (desktop app)
 
@@ -259,7 +372,7 @@ The service writes `C:\ProgramData\ThessleyPamWin\service.log` (approvals, denia
 | `enroll` is denied or cannot start for a normal user | `thessley-pam-win.cmd` is not readable by Users: re-run `install.ps1` (see above) |
 | The phone cannot reach the computer | The network is "Public" in Windows (the rule is Private only), or the phone is on mobile data, or a third-party firewall blocks TCP 47810 |
 | "Phone clock is off by more than a minute" | Fix the time on the phone or on this computer |
-| The login ends right after the password with no QR code | `gate.cmd` failed to start: check the path in `ForceCommand`, and that Python is where `gate.cmd` says |
+| The login ends right after the password with no QR code | The gate failed to start: check the Python and `gate_main.py` paths in `ForceCommand` |
 | QR code looks broken | The terminal is not UTF-8 or too narrow; use the `Link:` line with the desktop app |
 | An ssh key is added but the password is still asked | The account's `Match` block says `PubkeyAuthentication no` (the password variant). Use the key block above and restart `sshd` |
 | The key is ignored although the block allows keys | Wrong file (`C:\Users\NAME\.ssh\authorized_keys`, or `administrators_authorized_keys` for an administrator) or permissions too open: `sshd` ignores it without saying so; the OpenSSH event log shows the reason |
@@ -277,7 +390,7 @@ clear yes.
 
 - The installer ran as administrator; the scheduled task started the service, which listens on `127.0.0.1:47800` only.
 - The folder lockdown holds for a normal user: `users\` and `service.log` are unreadable, nothing in the program folder or
-  `gate.cmd` can be changed, and the admin tool is closed to them.
+  the Python gate files can be changed, and the admin tool is closed to them.
 - The running service refuses an account that is not enrolled, and rejects garbage, a bad address and a path-trick user name.
 - After `sshd` was restarted with the `Match User` block, a password login for that account from another computer on the
   LAN was accepted, the QR code and link were shown, and `service.log` recorded `approved by '<phone>' ... for <user>`.

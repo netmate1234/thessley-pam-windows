@@ -1,0 +1,12 @@
+Windows Registry Editor Version 5.00
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\{B78189D3-4FE6-4E6B-A143-D63D6436E96B}]
+@="Thessley Passkey unlock"
+
+[HKEY_CLASSES_ROOT\CLSID\{B78189D3-4FE6-4E6B-A143-D63D6436E96B}]
+@="Thessley Passkey unlock"
+
+[HKEY_CLASSES_ROOT\CLSID\{B78189D3-4FE6-4E6B-A143-D63D6436E96B}\InprocServer32]
+@="C:\\ProgramData\\ThessleyPamWin\\credential-provider\\ThessleyCredentialProvider.dll"
+"ThreadingModel"="Apartment"
+
