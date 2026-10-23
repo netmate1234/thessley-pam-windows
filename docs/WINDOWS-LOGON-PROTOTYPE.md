@@ -1,0 +1,103 @@
+# Windows sign-in prototype
+
+The first prototype step is a regular Windows desktop app that requests the same one-time phone approval planned for a future unlock tile. It shows the QR code and approval result, but does not submit a Windows credential, register a Credential Provider, or change login policy. The built-in Windows PIN and password choices are not affected.
+
+## Desktop test app
+
+`windows-logon-test/ThessleySignInTest.exe` connects to the local Thessley service at `127.0.0.1:47800`. Run it as the Windows account being tested. The service checks the connecting process token against the requested account, uses the existing signed `login` approval type, and neither consumes nor creates an SSH grace pass. Closing or cancelling the app drops the pending request.
+
+The app also has an **Enroll this account** action. It can add the first approver for its current Windows account when self-enrollment is enabled. The person scans the enrollment QR, compares the pairing code shown by the phone with the code shown in the app, and confirms the match in the app. An existing account with approvers still needs its current approver to approve adding another device.
+
+Build the portable app on Ubuntu with MinGW-w64:
+
+```sh
+windows-logon-test/build.sh
+```
+
+The executable is written to `windows-logon-test/build/ThessleySignInTest.exe`. The app needs the Thessley service already running and an active enrolled phone. Copying or running this app does not register a Windows sign-in component.
+
+## Experimental credential provider with QR-only sign-in after setup
+
+`windows-logon-provider` contains an experimental Credential Provider based on Microsoft's V2 sample. It supports workstation unlock (`CPUS_UNLOCK_WORKSTATION`) and interactive logon (`CPUS_LOGON`). It calls the service's `windows-logon` operation, which is accepted only from SYSTEM. First select **Set up QR-only sign-in**, approve the phone request, enter the account's current Windows password, and submit. The provider writes that password to a DPAPI machine-protected file only after Windows reports a successful sign-in. Later Thessley tile sign-ins request phone approval and submit the saved password without showing a password field. Password changes require the **Update saved QR sign-in** flow. If the stored password is rejected, the tile reveals that update flow. This vault is keyed by the Windows account SID and supports both local and Microsoft accounts through their existing credential serialization paths. The built-in Windows PIN and password providers remain separate recovery choices.
+
+This is a credential-provider password vault, not passwordless Windows authentication: the Windows password is reversibly encrypted at rest and supplied to the regular Windows authentication package after approval. The vault is scoped to the account SID and stored under the installer-protected `C:\ProgramData\ThessleyPamWin\credential-provider` directory. Local administrators and SYSTEM can access machine-protected data, as they can administer the machine.
+
+Build the x64 DLL on Ubuntu with MinGW-w64 using `windows-logon-provider/build.sh`. The output is `windows-logon-provider/build/ThessleyCredentialProvider.dll`.
+
+The provider build also compiles `windows-logon-test/ThessleySignInTest.cpp` as
+`windows-logon-provider/build/ThessleyQrViewer.exe`. The secure sign-in desktop uses this separate
+native window to render the QR code. The viewer can be resized or maximized; its QR stays square and
+uses the available client area. This update changes only the viewer layout, not the provider
+registration, saved credentials, account policy, or PIN/password recovery tiles.
+
+`install-with-rollback.ps1` is for a first install: it registers the Thessley provider and schedules `rollback.ps1` to remove only its registration after ten minutes by default. For an existing install, use `update-with-rollback.ps1`; it keeps the current provider DLL and QR viewer, schedules their restoration, and then switches to the new version. If correcting the files while that timer is already active, `refresh-existing-rollback.ps1` updates the files and leaves the current rollback untouched. After reaching the desktop and confirming QR sign-in, an administrator can run the installed `confirm.ps1` to cancel the timer. The built-in Windows PIN and password providers remain separate recovery choices. The provider writes lifecycle and enumeration results to `C:\ProgramData\ThessleyPamWin\credential-provider\provider.log`; it does not log usernames, passwords, QR payloads, or approval data. Do not cancel a rollback timer until a real sign-in has succeeded.
+
+To update only the QR viewer on an existing installation, rebuild it with
+`windows-logon-test/build.sh`. This produces both the desktop test app and
+`windows-logon-test/build/ThessleyQrViewer.exe`. From elevated PowerShell, run
+`windows-logon-test/update-qr-viewer.ps1`; it saves a timestamped copy of the installed viewer before
+replacing it and restores the backup if copying the new executable fails. Keep the existing rollback
+task and PIN/password recovery methods in place while updating.
+
+### Remote installation over SSH
+
+You can download, verify, extract, and run the provider installer through an interactive elevated SSH PowerShell session.
+First install the Thessley Windows service, start it, enroll the target Windows account's phone, and verify phone approval
+works. The Windows logon provider is separate from the SSH gate. If the phone is not enrolled for the target Windows
+account, enroll it from the elevated PowerShell session and compare the pairing code on both screens before confirming:
+
+```powershell
+& "$env:ProgramData\ThessleyPamWin\thessley-pam-win.cmd" enroll --user YOURNAME
+```
+
+Allow the approval/enrollment port range from the trusted LAN or VPN client subnet as described in `docs/SSH.md`. Keep
+the SSH session open, retain the Windows PIN and password tiles, and make sure you can reach the Windows sign-in screen
+locally or through Remote Desktop. An SSH shell cannot display or complete the interactive first-time QR sign-in for you.
+
+Connect with a PTY, then check that the session has an administrator token. Continue only if this prints `True`:
+
+```powershell
+ssh -t WINDOWS_ADMIN@WINDOWS_IP powershell.exe -NoProfile
+([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+```
+
+Download the experimental ZIP and checksum file on Windows, verify the hash, and extract the package:
+
+```powershell
+$zip = Join-Path $env:TEMP 'windows-qr-signin-experimental.zip'
+$sums = Join-Path $env:TEMP 'thessley-windows-SHA256SUMS.txt'
+Invoke-WebRequest 'https://wp-opsec.eagleeye-intelligence.com/wp-content/uploads/thessley-windows-downloads/windows-qr-signin-experimental.zip' -OutFile $zip
+Invoke-WebRequest 'https://wp-opsec.eagleeye-intelligence.com/wp-content/uploads/thessley-windows-downloads/SHA256SUMS.txt' -OutFile $sums
+$expected = ((Get-Content $sums | Where-Object { $_ -match 'windows-qr-signin-experimental\.zip$' }) -split '\s+')[0]
+if (-not $expected -or (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected.ToLowerInvariant()) { throw 'Package checksum mismatch; stop without installing.' }
+$package = Join-Path $env:TEMP 'Thessley-QR-Windows-SignIn-Experimental'
+Expand-Archive -LiteralPath $zip -DestinationPath $package -Force
+Set-Location (Join-Path $package 'Thessley-QR-Windows-SignIn-Experimental\windows-logon-provider')
+```
+
+For a first-time installation, run `install-with-rollback.ps1`. For an already registered provider, use
+`update-with-rollback.ps1` instead. A longer timer gives time to reach the sign-in screen and test; the scripts accept
+5–60 minutes:
+
+```powershell
+# First install
+.\install-with-rollback.ps1 -RollbackMinutes 30
+
+# Update an existing provider instead (do not run both commands)
+# .\update-with-rollback.ps1 -RollbackMinutes 30
+```
+
+At the Windows sign-in screen, use the Thessley tile, select **Set up QR-only sign-in**, approve on the enrolled phone,
+enter the current Windows password once, and complete sign-in. Test the QR tile a second time. If it fails, use the
+built-in PIN/password tile or leave rollback armed. After a successful QR sign-in, return to the still-open elevated SSH
+PowerShell and run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File "$env:ProgramData\ThessleyPamWin\credential-provider\confirm.ps1"
+```
+
+Do not confirm before a real sign-in. If the test fails, do not cancel rollback; its first-install action removes the
+Thessley provider registration, while its update action restores the previous provider files. Phone enrollment and
+approvals happen over the normal network. No ADB, USB debugging, or cable is required.
+
+The October 19, 2026 branding update is installed on the Windows test box with a ten-minute rollback pending user verification. It replaces the credential-tile bitmap and the QR viewer's in-window and title-bar icons. The icon assets are composited onto white so transparent rounded corners do not appear gray.
