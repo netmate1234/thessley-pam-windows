@@ -54,6 +54,9 @@ void layout_viewer(HWND hwnd) {
     const int qrX = (width - side) / 2;
     MoveWindow(g_status, margin, statusY, std::max(1, width - margin * 2), statusHeight, TRUE);
     MoveWindow(g_qr, qrX, qrTop, side, side, TRUE);
+    // The QR surface paints directly from g_matrix. Force a fresh paint after
+    // every layout change so the symbol follows the viewer's current size.
+    InvalidateRect(g_qr, nullptr, TRUE);
 }
 
 std::wstring current_user() {
@@ -212,6 +215,10 @@ void cancel_request() {
 }
 
 LRESULT CALLBACK qr_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_SIZE) {
+        InvalidateRect(hwnd, nullptr, TRUE);
+        return 0;
+    }
     if (msg == WM_PAINT) {
         PAINTSTRUCT ps{}; HDC dc = BeginPaint(hwnd, &ps);
         RECT r{}; GetClientRect(hwnd, &r);
@@ -239,18 +246,37 @@ LRESULT CALLBACK qr_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 for (auto &row : rows) row = row.substr(trim, qrWidth - trim * 2);
             }
         }
-        if (!rows.empty()) {
-            int count = (int)rows.size();
-            int cell = std::min((r.right - r.left - 2) / count, (r.bottom - r.top - 2) / count);
-            if (cell > 0) {
-                int side = cell * count, x0 = (r.right - side) / 2, y0 = (r.bottom - side) / 2;
-                HBRUSH black = (HBRUSH)GetStockObject(BLACK_BRUSH);
-                for (int y = 0; y < count; ++y) for (int x = 0; x < (int)rows[y].size(); ++x)
-                    if (rows[y][x] == L'1') { RECT m{x0+x*cell,y0+y*cell,x0+(x+1)*cell,y0+(y+1)*cell}; FillRect(dc,&m,black); }
+        const int count = (int)rows.size();
+        bool valid = count > 0;
+        for (const auto &row : rows) {
+            if ((int)row.size() != count) { valid = false; break; }
+            for (wchar_t bit : row) if (bit != L'0' && bit != L'1') { valid = false; break; }
+            if (!valid) break;
+        }
+        if (valid) {
+            // Map each module edge independently to the available square.
+            // Unlike flooring one integer cell size, this fills the whole QR
+            // area at every window size without dropping edge modules.
+            const int width = static_cast<int>(r.right - r.left);
+            const int height = static_cast<int>(r.bottom - r.top);
+            const int side = std::max(0, std::min(width, height));
+            const int x0 = static_cast<int>(r.left) + (width - side) / 2;
+            const int y0 = static_cast<int>(r.top) + (height - side) / 2;
+            HBRUSH black = (HBRUSH)GetStockObject(BLACK_BRUSH);
+            for (int y = 0; y < count; ++y) {
+                const int top = y0 + (y * side) / count;
+                const int bottom = y0 + ((y + 1) * side) / count;
+                for (int x = 0; x < count; ++x) if (rows[y][x] == L'1') {
+                    const int left = x0 + (x * side) / count;
+                    const int right = x0 + ((x + 1) * side) / count;
+                    RECT module{left, top, right, bottom};
+                    FillRect(dc, &module, black);
+                }
             }
         } else {
             SetBkMode(dc, TRANSPARENT); SetTextColor(dc, RGB(100,100,100));
-            DrawTextW(dc, L"QR code appears here", -1, &r, DT_CENTER|DT_VCENTER|DT_SINGLELINE);
+            DrawTextW(dc, g_matrix.empty() ? L"QR code appears here" : L"Waiting for complete QR data…",
+                      -1, &r, DT_CENTER|DT_VCENTER|DT_SINGLELINE);
         }
         EndPaint(hwnd, &ps); return 0;
     }
