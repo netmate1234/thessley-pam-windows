@@ -16,7 +16,8 @@
     5. creates a scheduled task that starts the service as SYSTEM at boot, and starts it.
 
   It does NOT change sshd_config, accounts or groups. Firewall rules are only added when requested: -OpenFirewall and
-  -OpenWebFirewall allow the Thessley ports from LocalSubnet by default; add -CloudAccess to scope those requested
+  -OpenWebFirewall allow the Thessley ports from LocalSubnet and the default VPN ranges 10.8.0.0/24 and 10.8.1.0/24;
+  pass -VpnClientSubnets '' to omit VPN ranges. Add -CloudAccess to scope those requested
   listeners to any remote IP, and -OpenSshFirewall to also allow TCP 22 from any IP. Provider security-group rules
   are managed separately.
 #>
