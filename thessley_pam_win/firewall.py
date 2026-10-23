@@ -48,7 +48,7 @@ function Set-ThessleyPortRule([string]$name, [int]$port) {{
         $rules | Set-NetFirewallRule -RemoteAddress $remote -Enabled True
     }} else {{
         $newRule = New-NetFirewallRule -DisplayName $name -Direction Inbound -Action Allow -Protocol TCP `
-            -LocalPort $port -Program $python -Profile Any -RemoteAddress $remote | Out-Null
+            -LocalPort $port -Program $python -Profile Any -RemoteAddress $remote
         $script:created += $newRule.Name
     }}
 }}
