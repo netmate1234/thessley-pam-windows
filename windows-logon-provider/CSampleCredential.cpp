@@ -769,30 +769,56 @@ HRESULT CSampleCredential::GetStringValue(DWORD dwFieldID, _Outptr_result_nullon
 // Get the image to show in the user tile
 HRESULT CSampleCredential::GetBitmapValue(DWORD dwFieldID, _Outptr_result_nullonfailure_ HBITMAP *phbmp)
 {
-    HRESULT hr;
     *phbmp = nullptr;
+    HRESULT hr = E_INVALIDARG;
 
-    if ((SFI_TILEIMAGE == dwFieldID))
+    if (SFI_TILEIMAGE == dwFieldID)
     {
-        // Load as a DIB section so the 32-bit tile bitmap retains its alpha channel.
-        HBITMAP hbmp = static_cast<HBITMAP>(LoadImage(
-            HINST_THISDLL, MAKEINTRESOURCE(IDB_TILE_IMAGE), IMAGE_BITMAP,
-            0, 0, LR_CREATEDIBSECTION));
-        if (hbmp != nullptr)
+        // Load the RT_BITMAP resource directly. LoadImage/LoadBitmap reject
+        // this V4 header in LogonUI on some Windows 11 builds.
+        HRSRC resource = FindResourceW(HINST_THISDLL,
+                                       MAKEINTRESOURCEW(IDB_TILE_IMAGE), RT_BITMAP);
+        const DWORD resourceSize = resource ? SizeofResource(HINST_THISDLL, resource) : 0;
+        HGLOBAL loaded = resource ? LoadResource(HINST_THISDLL, resource) : nullptr;
+        const auto *header = loaded
+            ? static_cast<const BITMAPV4HEADER *>(LockResource(loaded)) : nullptr;
+
+        if (header && resourceSize >= sizeof(BITMAPV4HEADER) &&
+            header->bV4Size == sizeof(BITMAPV4HEADER) &&
+            header->bV4Width > 0 && header->bV4Width <= 512 &&
+            header->bV4Height != 0 && header->bV4Height >= -512 && header->bV4Height <= 512 &&
+            header->bV4BitCount == 32 && header->bV4V4Compression == BI_BITFIELDS &&
+            header->bV4AlphaMask != 0 && header->bV4SizeImage != 0 &&
+            static_cast<ULONGLONG>(header->bV4Size) + header->bV4SizeImage <= resourceSize)
         {
-            hr = S_OK;
-            *phbmp = hbmp;
+            void *pixels = nullptr;
+            HDC screen = GetDC(nullptr);
+            HBITMAP bitmap = screen ? CreateDIBSection(
+                screen, reinterpret_cast<const BITMAPINFO *>(header), DIB_RGB_COLORS,
+                &pixels, nullptr, 0) : nullptr;
+            if (screen) ReleaseDC(nullptr, screen);
+
+            if (bitmap && pixels)
+            {
+                CopyMemory(pixels,
+                           reinterpret_cast<const BYTE *>(header) + header->bV4Size,
+                           header->bV4SizeImage);
+                *phbmp = bitmap;
+                hr = S_OK;
+            }
+            else
+            {
+                if (bitmap) DeleteObject(bitmap);
+                hr = HRESULT_FROM_WIN32(GetLastError());
+            }
         }
         else
         {
-            hr = HRESULT_FROM_WIN32(GetLastError());
+            hr = HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
         }
     }
-    else
-    {
-        hr = E_INVALIDARG;
-    }
 
+    ProviderDiag(L"GetBitmapValue", hr, dwFieldID);
     return hr;
 }
 

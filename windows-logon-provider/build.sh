@@ -12,7 +12,7 @@ mkdir -p "$out_dir"
   -include mingw_compat.h -shared -static -pthread \
   CSampleCredential.cpp CSampleProvider.cpp Dll.cpp guid.cpp helpers.cpp provider_diag.cpp password_vault.cpp \
   "$out_dir/provider-res.o" samplev2credentialprovider.def \
-  -lcredui -lole32 -loleaut32 -lshlwapi -lsecur32 -ladvapi32 -lws2_32 -luuid -lcrypt32 \
+  -lcredui -lole32 -loleaut32 -lshlwapi -lsecur32 -ladvapi32 -lgdi32 -lws2_32 -luuid -lcrypt32 \
   -o "$out_dir/ThessleyCredentialProvider.dll"
 
 # The credential provider uses this native bitmap window on the secure logon
