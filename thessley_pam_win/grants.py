@@ -20,6 +20,7 @@ window short and end passes (end-pass) when in doubt.
 import json
 import hashlib
 import hmac
+import ipaddress
 import os
 import re
 import secrets
@@ -28,10 +29,91 @@ import tempfile
 import threading
 import time
 
-from . import store
+from . import machine, store
 
 MAX_HOURS = 24.0
 LOCAL = "-"
+SSH_SOURCE_MODES = ("all", "local", "vpn", "custom")
+SSH_SOURCE_DEFAULTS = {"modes": ["local", "vpn"], "vpn_subnets": ["10.8.0.0/24", "10.8.1.0/24"], "addresses": []}
+
+
+def parse_ipv4_networks(value: str | list[str] | tuple[str, ...]) -> list[str]:
+    """Normalize a comma/space separated set of IPv4 addresses and CIDR ranges."""
+    if isinstance(value, str):
+        items = value.replace(",", " ").split()
+    elif isinstance(value, (list, tuple)):
+        items = [str(item).strip() for item in value if str(item).strip()]
+    else:
+        raise ValueError("Enter IPv4 addresses or CIDR ranges.")
+    if len(items) > 64:
+        raise ValueError("Enter no more than 64 IPv4 addresses or networks.")
+    networks = []
+    for item in items:
+        try:
+            network = ipaddress.ip_network(item, strict=False)
+        except ValueError as exc:
+            raise ValueError(f"Invalid IPv4 address or CIDR range: {item}") from exc
+        if network.version != 4:
+            raise ValueError("Use IPv4 addresses and CIDR ranges for Windows Firewall.")
+        normalized = str(network)
+        if normalized not in networks:
+            networks.append(normalized)
+    return networks
+
+
+def ssh_source_policy() -> dict:
+    config = _load_config()
+    modes = config.get("ssh_source_modes", SSH_SOURCE_DEFAULTS["modes"])
+    if (not isinstance(modes, list) or not modes or any(mode not in SSH_SOURCE_MODES for mode in modes)
+            or len(modes) != len(set(modes)) or ("all" in modes and len(modes) != 1)):
+        modes = ["invalid"]
+    try:
+        vpn_subnets = parse_ipv4_networks(config.get("vpn_client_subnets", SSH_SOURCE_DEFAULTS["vpn_subnets"]))
+        addresses = parse_ipv4_networks(config.get("ssh_allowed_ips", []))
+    except ValueError:
+        vpn_subnets, addresses = [], []
+        modes = ["invalid"]
+    return {"modes": modes, "vpn_subnets": vpn_subnets, "addresses": addresses}
+
+
+def set_ssh_source_policy(modes: list[str] | tuple[str, ...], vpn_subnets, addresses) -> None:
+    if (not isinstance(modes, (list, tuple)) or not modes or any(mode not in SSH_SOURCE_MODES for mode in modes)
+            or len(modes) != len(set(modes)) or ("all" in modes and len(modes) != 1)):
+        raise ValueError("Choose All IPs alone, or one or more of local, VPN, and chosen-list access.")
+    vpn_subnets = parse_ipv4_networks(vpn_subnets)
+    addresses = parse_ipv4_networks(addresses)
+    if "vpn" in modes and not vpn_subnets:
+        raise ValueError("Enter at least one VPN client subnet or uncheck VPN networks.")
+    if "custom" in modes and not addresses:
+        raise ValueError("Enter at least one address or CIDR range for Chosen list.")
+    store.ensure_dirs()
+    data = _load_config()
+    data["ssh_source_modes"] = list(modes)
+    data["vpn_client_subnets"] = vpn_subnets
+    if "custom" in modes:
+        data["ssh_allowed_ips"] = addresses
+    else:
+        data.pop("ssh_allowed_ips", None)
+    _atomic_write(_config_path(), data, store.BASE)
+
+
+def ssh_source_client_allowed(client_ip: str, modes, vpn_subnets, addresses) -> bool:
+    if modes == ["all"]:
+        return True
+    try:
+        address = ipaddress.ip_address(client_ip)
+        networks = []
+        if "local" in modes:
+            networks.extend(ipaddress.ip_network(item) for item in machine.interface_networks("local"))
+            if address.is_loopback:
+                return True
+        if "vpn" in modes:
+            networks.extend(ipaddress.ip_network(item) for item in vpn_subnets)
+        if "custom" in modes:
+            networks.extend(ipaddress.ip_network(item) for item in addresses)
+        return any(address.version == network.version and address in network for network in networks)
+    except (TypeError, ValueError, OSError):
+        return False
 
 
 def _config_path() -> str:

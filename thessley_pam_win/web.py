@@ -36,6 +36,7 @@ import secrets
 import socket
 import ssl
 import subprocess
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -46,7 +47,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
-from . import enroll, grants, machine, ssh_policy, store
+from . import enroll, firewall, grants, machine, ssh_policy, store
 
 TTY_LOGIN, TTY_CHANGE, TTY_DEVICE = "web", "web-change", "add-device"  # what approve.run is told (it names them for the apps)
 
@@ -437,7 +438,8 @@ class WebApp:
             return f"/enroll/{flow.id}", ""
         return run
 
-    def change_setting(self, name: str, value: str):
+    def change_setting(self, name: str, value: str, details: dict | None = None):
+        details = details or {}
         def run():
             if name == "grace":
                 grants.set_grace(float(value))
@@ -471,6 +473,24 @@ class WebApp:
             if name == "ssh_fallback_unenrolled":
                 grants.set_ssh_fallback_unenrolled(value == "on")
                 return "/admin", "Unenrolled-account SSH fallback: " + ("on." if value == "on" else "off.")
+            if name == "ssh_source_policy":
+                modes = details["modes"]
+                vpn_subnets = details["vpn_subnets"]
+                addresses = details["addresses"]
+                old = grants.ssh_source_policy()
+                firewall.apply_ssh_source_policy(modes, vpn_subnets, addresses, sys.executable)
+                try:
+                    grants.set_ssh_source_policy(modes, vpn_subnets, addresses)
+                except Exception:
+                    try:
+                        firewall.apply_ssh_source_policy(old["modes"], old["vpn_subnets"], old["addresses"], sys.executable)
+                    except Exception:
+                        pass
+                    raise
+                labels = {"all": "All IPs", "local": "Local networks", "vpn": "VPN networks", "custom": "Chosen list"}
+                summary = ", ".join(labels[mode] for mode in modes)
+                self.log(f"web page: SSH source policy changed to {summary}", False)
+                return "/admin", "Windows Firewall source policy saved: " + summary + "."
             raise ValueError("unknown setting")
         return run
 
@@ -750,6 +770,9 @@ button{min-height:44px;padding:9px 14px;border-radius:8px;border:1px solid var(-
 .btn.small{padding:7px 12px;font-size:.9rem}
 button.primary{background:var(--accent);border-color:var(--accent);color:#fff}button.danger{color:var(--danger);border-color:var(--danger)}
 .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:8px;min-width:0}.row form{display:flex;gap:8px;flex-wrap:wrap;align-items:center;max-width:100%;min-width:0}
+.ssh-source-form{display:grid;gap:8px;margin-top:10px;min-width:0}.ssh-source-options{display:grid;gap:8px;margin:10px 0}
+.ssh-source-options label{display:flex;gap:9px;align-items:flex-start;min-width:0}.ssh-source-options input[type=checkbox]{width:1.1rem;height:1.1rem;flex:0 0 auto;margin:.2rem 0 0}
+.ssh-source-form input[type=text]{width:100%;min-width:0;max-width:100%}
 .flash{border-left:4px solid var(--ok);padding:8px 12px;margin:10px 0;background:var(--card)}
 code,.mono{font-family:ui-monospace,monospace;word-break:break-all;font-size:.85rem}
 .qr{display:block;margin:12px auto;background:#fff;padding:6px;border-radius:8px;width:min(100%,520px);max-width:100%;height:auto;aspect-ratio:1;object-fit:contain;image-rendering:pixelated}
@@ -1079,6 +1102,31 @@ def admin_page(viewer: Session, flash: str, listener_host: str = "") -> str:
                 "After a phone is enrolled, QR approval is required. A disabled phone does not count as an unconfigured account.</p>"
                 "<p>Use <em>Block SSH</em> to deny that account regardless of its key, password, or phone. Clear both controls to restore ordinary SSH access. "
                 "Every change asks for a fresh admin phone approval, backs up <code>sshd_config</code>, validates it, and restarts OpenSSH.</p></div>")
+    source = grants.ssh_source_policy()
+    source_modes = source["modes"] if source["modes"] != ["invalid"] else ["local", "vpn"]
+    source_error = "The saved network policy is malformed. Save a valid policy to repair it." if source["modes"] == ["invalid"] else ""
+    local_networks = machine.interface_networks("local")
+    source_policy = (
+        "<div class='card'><strong>Allowed source networks for SSH and Thessley services</strong>"
+        + (f"<p class='bad'>{esc(source_error)}</p>" if source_error else "")
+        + "<p class='dim'>Default: Local networks + VPN networks. This scopes the default OpenSSH firewall rule when installed, plus Thessley approvals TCP 47810 and admin page TCP 47820. "
+          "The browser's current network must remain selected. Other firewall allow rules can also grant access.</p>"
+        + f"<form method='post' action='/admin/set' class='ssh-source-form'>{hidden}<input type='hidden' name='name' value='ssh_source_policy'>"
+        + "<div class='ssh-source-options'>"
+        + f"<label><input id='ssh-source-all' type='checkbox' name='all' value='on'{ ' checked' if source_modes == ['all'] else ''} "
+          "onchange=\"if(this.checked)document.querySelectorAll('.ssh-source-restrict').forEach(x=>x.checked=false)\"> All IPs</label>"
+        + f"<label><input class='ssh-source-restrict' type='checkbox' name='local' value='on'{ ' checked' if 'local' in source_modes else ''} "
+          "onchange=\"if(this.checked)document.getElementById('ssh-source-all').checked=false\"> Local networks</label>"
+        + f"<label><input class='ssh-source-restrict' type='checkbox' name='vpn' value='on'{ ' checked' if 'vpn' in source_modes else ''} "
+          "onchange=\"if(this.checked)document.getElementById('ssh-source-all').checked=false\"> VPN networks</label>"
+        + f"<label><input class='ssh-source-restrict' type='checkbox' name='custom' value='on'{ ' checked' if 'custom' in source_modes else ''} "
+          "onchange=\"if(this.checked)document.getElementById('ssh-source-all').checked=false\"> Chosen list</label></div>"
+        + "<label for='vpn-subnets'>VPN client subnets</label>"
+        + f"<input id='vpn-subnets' type='text' name='vpn_subnets' value='{esc(', '.join(source['vpn_subnets']))}' placeholder='10.8.0.0/24, 10.8.1.0/24'>"
+        + "<label for='ssh-source-addresses'>Additional IP addresses or CIDR ranges for Chosen list</label>"
+        + f"<input id='ssh-source-addresses' type='text' name='addresses' value='{esc(', '.join(source['addresses']))}' placeholder='Example: 203.0.113.7, 198.51.100.0/24'>"
+        + f"<p class='dim'>Detected local networks: {esc(', '.join(local_networks) or 'none')}. Enter your VPN client subnet above if automatic detection is unavailable.</p>"
+        + "<button>Save network access</button></form></div>")
     ssh_accounts_html = ""
     try:
         accounts = ssh_policy.local_accounts()
@@ -1134,7 +1182,7 @@ def admin_page(viewer: Session, flash: str, listener_host: str = "") -> str:
         ssh_accounts_html = f"<p class='bad'>Could not read local SSH accounts: {esc(str(exc))}</p>"
     return (flash_html(flash) + "<h2>Settings for this computer</h2>"
             "<p class='dim'>Only administrators see this page. Every change asks your device for a fresh approval.</p>"
-            + ssh_help + ssh_accounts_html + ssh_fallback + limits + logging + local_only + grace + toggle + f"<p class='dim'>Passes held right now: {esc(len(grants.all_passes()))}.</p>")
+            + source_policy + ssh_help + ssh_accounts_html + ssh_fallback + limits + logging + local_only + grace + toggle + f"<p class='dim'>Passes held right now: {esc(len(grants.all_passes()))}.</p>")
 
 
 # ---- HTTP ------------------------------------------------------------------------------------------------------
@@ -1457,6 +1505,7 @@ def make_handler(app: WebApp):
 
         def admin_action(self, data: dict, s: Session) -> None:
             name, value = data.get("name", ""), (data.get("value") or "").strip()
+            details = {}
             if name == "ssh_policy":
                 target, factor = (data.get("user") or "").strip(), (data.get("factor") or "native").strip()
                 try:
@@ -1472,6 +1521,29 @@ def make_handler(app: WebApp):
                 blocked = data.get("blocked") == "on"
                 description = f"updating SSH access for account {target_key}"
                 return self.start_change(s, description, app.change_ssh_access(target_key, enabled, blocked, factor))
+            if name == "ssh_source_policy":
+                if data.get("all") == "on":
+                    if any(data.get(option) == "on" for option in ("local", "vpn", "custom")):
+                        return self.html(400, "Not valid", flash_html("All IPs cannot be combined with restricted source types."), s)
+                    modes = ["all"]
+                else:
+                    modes = [option for option in ("local", "vpn", "custom") if data.get(option) == "on"]
+                if not modes:
+                    return self.html(400, "Not valid", flash_html("Choose All IPs or at least one restricted source type."), s)
+                try:
+                    vpn_subnets = grants.parse_ipv4_networks(data.get("vpn_subnets") or "")
+                    addresses = grants.parse_ipv4_networks(data.get("addresses") or "") if "custom" in modes else []
+                except ValueError as exc:
+                    return self.html(400, "Not valid", flash_html(str(exc)), s)
+                if "vpn" in modes and not vpn_subnets:
+                    return self.html(400, "Not valid", flash_html("Enter at least one VPN client subnet or uncheck VPN networks."), s)
+                if "custom" in modes and not addresses:
+                    return self.html(400, "Not valid", flash_html("Enter at least one IP address or CIDR range for Chosen list."), s)
+                if not grants.ssh_source_client_allowed(self.ip(), modes, vpn_subnets, addresses):
+                    return self.html(400, "Not allowed", flash_html(f"This would block the browser you are using ({self.ip()}). Keep its network selected."), s)
+                details = {"modes": modes, "vpn_subnets": vpn_subnets, "addresses": addresses}
+                return self.start_change(s, "changing Windows Firewall source networks",
+                                         app.change_setting(name, "ssh_source_policy", details))
             if name == "grace":
                 try:
                     hours = float(value)
@@ -1504,7 +1576,7 @@ def make_handler(app: WebApp):
                     return self.html(400, "Not valid", flash_html("Choose on or off."), s)
             else:
                 return self.html(404, "Not found", flash_html("No such setting."), s)
-            self.start_change(s, f"changing a setting ({name})", app.change_setting(name, value))
+            self.start_change(s, f"changing a setting ({name})", app.change_setting(name, value, details))
 
         @staticmethod
         def failure_text(f: Flow) -> str:

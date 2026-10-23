@@ -1,7 +1,10 @@
 """Facts about this computer that go into QR codes."""
 
 import hashlib
+import ipaddress
+import re
 import socket
+import subprocess
 
 
 def machine_id() -> str:
@@ -26,3 +29,36 @@ def lan_ip() -> str:
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
         s.connect(("192.0.2.1", 9))  # TEST-NET-1, never routed
         return s.getsockname()[0]
+
+
+def interface_networks(kind: str = "local") -> list[str]:
+    """Return IPv4 networks on Windows interfaces, optionally filtering VPN adapter names."""
+    if kind not in ("local", "vpn"):
+        raise ValueError("Network kind must be local or vpn.")
+    command = (
+        "$ErrorActionPreference='Stop'; "
+        "Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop | "
+        "Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' } | "
+        "ForEach-Object { Write-Output ($_.IPAddress + '/' + $_.PrefixLength + '|' + $_.InterfaceAlias) }"
+    )
+    try:
+        result = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
+                                capture_output=True, text=True, errors="replace", timeout=10, check=True)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    vpn_name = re.compile(r"(?:^|[^a-z0-9])(vpn|openvpn|ovpn|wintun|tun|tap|wireguard|wg|tailscale|zerotier|zt)(?:$|[^a-z0-9])", re.I)
+    found = set()
+    for line in result.stdout.splitlines():
+        address, separator, alias = line.strip().partition("|")
+        if not separator or (kind == "vpn") != bool(vpn_name.search(alias)):
+            continue
+        try:
+            interface = ipaddress.ip_interface(address)
+        except ValueError:
+            continue
+        if interface.ip.is_loopback or interface.ip.is_link_local or interface.ip.is_multicast:
+            continue
+        if kind == "local" and not interface.ip.is_private:
+            continue
+        found.add(str(interface.network))
+    return sorted(found)

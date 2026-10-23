@@ -83,6 +83,10 @@ The page opens in dark mode. Use the **Light mode** button in the header to swit
   browser session can look but not change anything. A sign-in or a change never uses a pass and never grants one.
 - **Administrators** (members of the local Administrators group) can pick any account and change the settings
   (how long one approval counts, whether users may enrol their own first approver). Their own phone approves each change.
+- **Allowed source networks:** Admin → Settings defaults to local networks plus the VPN client ranges
+  `10.8.0.0/24` and `10.8.1.0/24`. Administrators can select all IPs, local networks, VPN ranges, and/or a chosen
+  CIDR list. Saving requires a fresh phone approval and updates the Windows Firewall scopes for the default OpenSSH
+  rule and Thessley listeners on TCP 47810 and 47820. The browser's current network must stay selected.
 - **Passes:** under your approvers, the ssh approvals that currently let your account in without asking your device again
   (the grace hours), each with an **End this pass** button, and **End all passes**. The next login then asks your device again.
   Ending a pass only takes access away, so it needs no fresh approval.

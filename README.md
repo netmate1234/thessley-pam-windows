@@ -21,6 +21,8 @@ tile has its own rollback. Confirm only
 after testing every selected login method with `C:\ProgramData\ThessleyPamWin\confirm-setup.ps1`. Python 3.10+ for all
 users is required; if it is missing, the wizard offers to install Python 3.13 with winget. It detects a missing
 OpenSSH service and stops before changing SSH policy.
+Under **Admin → Settings**, administrators can select allowed source networks for SSH, phone approvals, and the web page.
+The default is local networks plus VPN client ranges `10.8.0.0/24` and `10.8.1.0/24`; chosen CIDRs can be added.
 For local hosts, the firewall defaults to local networks plus VPN client ranges `10.8.0.0/24` and `10.8.1.0/24`
 for SSH, phone approvals, and the admin page. The installer adds a separate VPN-only SSH firewall rule, preserving
 the existing local-subnet rule. The guided installer lets you skip those VPN ranges or enter custom CIDRs.
