@@ -145,10 +145,11 @@ installer as two separate installs.
 
        powershell -ExecutionPolicy Bypass -File install\install.ps1 -Python "C:\Program Files\Python313\python.exe" -OpenFirewall
 
-   It refuses a Python that normal users can write to, installs the pinned dependencies from `requirements.lock` and verifies
-   their versions and dependency consistency, copies the program to
-   `C:\ProgramData\ThessleyPamWin`, closes the data folders to normal users, creates the scheduled task that runs the
-   service as SYSTEM at boot, and starts it. It never touches `sshd_config`, accounts or groups.
+   It refuses a Python that normal users can write to, installs and verifies the pinned dependencies in a private staging
+   directory, then swaps the app into `C:\ProgramData\ThessleyPamWin`. If activation or startup fails, it restores the
+   previous app and scheduled task definitions. The prior app is kept under `C:\ProgramData\ThessleyPamWin\backups`;
+   keys, passes, certificates and web settings remain outside the app directory. It never modifies machine-wide Python,
+   `sshd_config`, accounts or groups.
 
    **Firewall note:** the installer option `-OpenFirewall` opens TCP 47810 from the local subnet on Private networks.
    Standalone enrollment can use another port in the 47810–47819 range when the shared listener already occupies 47810.

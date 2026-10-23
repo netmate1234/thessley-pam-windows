@@ -18,6 +18,12 @@ after testing every selected login method with `C:\ProgramData\ThessleyPamWin\co
 users is required; if it is missing, the wizard offers to install Python 3.13 with winget. It detects a missing
 OpenSSH service and stops before changing SSH policy.
 
+The installer builds the new app and its pinned dependencies in a private staging directory, import-checks them, then
+swaps them in. If the service or previously enabled web task fails its startup check, it restores the prior app and
+scheduled task definitions. The last working app is kept under `C:\ProgramData\ThessleyPamWin\backups`; user keys,
+passes, web settings and certificates remain outside the app directory. Dependencies are installed beside the app,
+not into machine-wide Python.
+
 You can also install over an existing SSH connection. First install and test Windows OpenSSH independently, then connect
 with an interactive PowerShell session and confirm it has an administrator token. Use the hosted one-line bootstrap or
 transfer this package and run `guided-install.ps1`. Enroll and verify the phone first; keep the current SSH session open
@@ -36,4 +42,5 @@ while the wizard applies and tests the SSH gate.
 | `thessley_pam_win/listener.py` | exclusive-use HTTPS listeners for the web page and the daemon's shared, concurrent SSH approval listener |
 | `install/install.ps1`, `uninstall.ps1` | administrator scripts: service, folder permissions, optional firewall rule |
 
-Needs Python 3.10+ installed for all users, plus `cryptography` and `qrcode`. Tests: `pip install -e .[test]` then `python -m pytest`.
+Needs Python 3.10+ installed for all users. The installer fetches the pinned runtime wheels into its private app directory.
+Tests: `pip install -e .[test]` then `python -m pytest`.
