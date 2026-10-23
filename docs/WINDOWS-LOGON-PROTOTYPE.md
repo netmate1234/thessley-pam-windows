@@ -103,4 +103,24 @@ Do not confirm before a real sign-in. If the test fails, do not cancel rollback;
 Thessley provider registration, while its update action restores the previous provider files. Phone enrollment and
 approvals happen over the normal network. No ADB, USB debugging, or cable is required.
 
-The October 19, 2026 branding update is installed on the Windows test box with a ten-minute rollback pending user verification. It replaces the credential-tile bitmap and the QR viewer's in-window and title-bar icons. The icon assets are composited onto white so transparent rounded corners do not appear gray.
+### If the Thessley tile is missing
+
+The QR viewer (`ThessleyQrViewer.exe`) only draws the QR window. Installing or replacing that executable by itself
+does not create a Windows sign-in tile. The tile is provided by `ThessleyCredentialProvider.dll`, which the
+rollback-protected installer registers in the 64-bit Windows Credential Provider registry. If the tile is absent,
+check whether the rollback timer ran before the installation was confirmed. From elevated PowerShell:
+
+```powershell
+Get-ScheduledTask -TaskName ThessleyCredentialProviderRollback -ErrorAction SilentlyContinue |
+  Select-Object TaskName,State
+Test-Path 'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\{B78189D3-4FE6-4E6B-A143-D63D6436E96B}'
+Test-Path 'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Classes\CLSID\{B78189D3-4FE6-4E6B-A143-D63D6436E96B}\InprocServer32'
+```
+
+If both registry checks return `False`, the provider is not registered. Use `install-with-rollback.ps1` for a first
+install, or `update-with-rollback.ps1` only when a provider is already registered. Keep PIN and password recovery
+available, test QR sign-in, and confirm the rollback only after sign-in succeeds. If the rollback task is still
+present, understand its pending action before starting another install. Phone enrollment is needed to complete QR
+sign-in setup, but it does not control whether the tile appears.
+
+The October 19, 2026 branding update changed the credential-tile bitmap and the QR viewer's in-window and title-bar icons. The icon assets are composited onto white so transparent rounded corners do not appear gray.
