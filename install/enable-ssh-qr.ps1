@@ -11,6 +11,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 
+
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw 'Run this from an elevated PowerShell window.'
 }
@@ -58,7 +59,7 @@ $firstMatch = -1
 for ($i = 0; $i -lt $lines.Length; $i++) {
     if ($lines[$i] -match '^\s*Match\s+') { $firstMatch = $i; break }
 }
-$auth = switch ($Factor) {
+ $auth = switch ($Factor) {
     'key' { "    PasswordAuthentication no`n    PubkeyAuthentication yes`n    AuthenticationMethods publickey" }
     'password' { "    PasswordAuthentication yes`n    PubkeyAuthentication no`n    AuthenticationMethods password" }
     'key-password' { "    PasswordAuthentication yes`n    PubkeyAuthentication yes`n    AuthenticationMethods publickey,password" }
@@ -68,7 +69,7 @@ if (-not (Test-Path -LiteralPath $gate)) { throw 'The Thessley approval service 
 $pythonQuoted = '"' + $Python.Replace('"', '\"') + '"'
 $gateQuoted = '"' + $gate + '"'
 $block = @(
-    "# Thessley phone approval for $UserName",
+    "# BEGIN THESSLEY SSH QR USER $($UserName.ToLowerInvariant())",
     "Match User $UserName"
 ) + ($auth -split "`n") + @(
     '    KbdInteractiveAuthentication no',
@@ -77,7 +78,8 @@ $block = @(
     '    X11Forwarding no',
     '    PermitTunnel no',
     '    PermitTTY yes',
-    "    ForceCommand $pythonQuoted -I -X utf8 $gateQuoted"
+    "    ForceCommand $pythonQuoted -I -X utf8 $gateQuoted",
+    "# END THESSLEY SSH QR USER $($UserName.ToLowerInvariant())"
 )
 if ($firstMatch -ge 0) {
     $newLines = @()

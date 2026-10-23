@@ -68,7 +68,10 @@ def main() -> None:
         "This package installs the Thessley QR approval service for Windows OpenSSH and its HTTPS admin web GUI.\n"
         "Read docs/SSH.md and docs/WEB.md before installing. Requires Windows 11, administrator PowerShell, and\n"
         "Python 3.10+ installed for all users under Program Files. The guided installer can optionally configure\n"
-        "one account's SSH QR gate with a config backup and timed rollback, and install or update the experimental\n"
+        "the HTTPS admin page, where administrators manage per-account SSH QR requirements and first factors. It can also\n"
+        "allow phone and web traffic from VPN client subnets (Y/Enter accepts 10.8.0.0/24 and 10.8.1.0/24, N skips, or enter custom CIDRs),\n"
+        "or configure cloud mode for changing public client IPs (TCP 22/47810, optionally 47820). Cloud-provider firewall rules are separate.\n"
+        "install or update the experimental\n"
         "Windows QR sign-in tile with its own rollback. Both are opt-in; retain an SSH session and PIN/password\n"
         "recovery until tested. Other Windows helper app bundles are included in downloads/.\n",
     )

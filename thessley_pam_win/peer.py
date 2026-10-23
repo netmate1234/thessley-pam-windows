@@ -15,6 +15,8 @@ TCP_TABLE_OWNER_PID_ALL = 5
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 TOKEN_QUERY = 0x0008
 TOKEN_USER = 1
+TOKEN_ELEVATION = 20
+WIN_LOCAL_SYSTEM_SID = 22  # WELL_KNOWN_SID_TYPE.WinLocalSystemSid
 LOOPBACK = 0x0100007F  # 127.0.0.1 as Windows stores it (little endian)
 
 
@@ -91,3 +93,84 @@ def client_user(client_address: tuple, server_port: int) -> str | None:
         return None
     pid = owner_pid(port, server_port)
     return process_user(pid) if pid else None
+
+
+def process_is_system(pid: int) -> bool | None:
+    """Whether process `pid` has the well-known LocalSystem SID, independent of UI language."""
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    advapi32.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+    advapi32.GetTokenInformation.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+                                             ctypes.POINTER(wintypes.DWORD)]
+    advapi32.IsWellKnownSid.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    advapi32.IsWellKnownSid.restype = wintypes.BOOL
+    process = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not process:
+        return None
+    token = wintypes.HANDLE()
+    try:
+        if not advapi32.OpenProcessToken(process, TOKEN_QUERY, ctypes.byref(token)):
+            return None
+        needed = wintypes.DWORD(0)
+        advapi32.GetTokenInformation(token, TOKEN_USER, None, 0, ctypes.byref(needed))
+        if not needed.value:
+            return None
+        buf = ctypes.create_string_buffer(needed.value)
+        if not advapi32.GetTokenInformation(token, TOKEN_USER, buf, needed, ctypes.byref(needed)):
+            return None
+        sid = ctypes.c_void_p.from_buffer(buf).value
+        return bool(advapi32.IsWellKnownSid(sid, WIN_LOCAL_SYSTEM_SID))
+    finally:
+        if token:
+            kernel32.CloseHandle(token)
+        kernel32.CloseHandle(process)
+
+
+def client_is_system(client_address: tuple, server_port: int) -> bool:
+    """Check the peer process token against LocalSystem's SID rather than its localized account name."""
+    host, port = client_address[0], client_address[1]
+    if host != "127.0.0.1":
+        return False
+    pid = owner_pid(port, server_port)
+    return bool(pid and process_is_system(pid))
+
+
+def process_is_elevated(pid: int) -> bool:
+    """Whether the process token has an enabled elevated administrator token."""
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    advapi32.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+    advapi32.GetTokenInformation.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+                                             ctypes.POINTER(wintypes.DWORD)]
+    process = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not process:
+        return False
+    token = wintypes.HANDLE()
+    try:
+        if not advapi32.OpenProcessToken(process, TOKEN_QUERY, ctypes.byref(token)):
+            return False
+        elevation = wintypes.DWORD()
+        needed = wintypes.DWORD()
+        if not advapi32.GetTokenInformation(token, TOKEN_ELEVATION, ctypes.byref(elevation),
+                                             ctypes.sizeof(elevation), ctypes.byref(needed)):
+            return False
+        return bool(elevation.value)
+    finally:
+        if token:
+            kernel32.CloseHandle(token)
+        kernel32.CloseHandle(process)
+
+
+def client_is_elevated(client_address: tuple, server_port: int) -> bool:
+    """Check that the local RPC caller is running with an elevated Windows token."""
+    host, port = client_address[0], client_address[1]
+    if host != "127.0.0.1":
+        return False
+    pid = owner_pid(port, server_port)
+    return bool(pid and process_is_elevated(pid))

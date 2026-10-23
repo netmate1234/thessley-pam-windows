@@ -23,3 +23,13 @@ def lines(text: str, border: int = 1) -> list[str]:
             row += {(True, True): " ", (True, False): "▄", (False, True): "▀", (False, False): "█"}[(top, bottom)]
         out.append(row)
     return out
+
+
+def bitmap_rows(text: str, border: int = 4) -> list[str]:
+    """Return a QR matrix as 0/1 rows for native UI clients to paint as a bitmap."""
+    if qrcode is None:
+        return []
+    q = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_M, border=border)
+    q.add_data(text)
+    q.make(fit=True)
+    return ["".join("1" if dark else "0" for dark in row) for row in q.get_matrix()]

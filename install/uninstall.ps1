@@ -23,11 +23,16 @@ Unregister-ScheduledTask -TaskName 'ThessleyPamWin' -Confirm:$false -ErrorAction
 Stop-ScheduledTask -TaskName 'ThessleyPamWinWeb' -ErrorAction SilentlyContinue
 Unregister-ScheduledTask -TaskName 'ThessleyPamWinWeb' -Confirm:$false -ErrorAction SilentlyContinue
 Remove-NetFirewallRule -DisplayName 'Thessley Passkey approvals' -ErrorAction SilentlyContinue
+Remove-NetFirewallRule -DisplayName 'Thessley Passkey approvals VPN' -ErrorAction SilentlyContinue
+Remove-NetFirewallRule -DisplayName 'Thessley phone enrollment range' -ErrorAction SilentlyContinue
+Remove-NetFirewallRule -DisplayName 'Thessley phone enrollment range VPN' -ErrorAction SilentlyContinue
 Remove-NetFirewallRule -DisplayName 'Thessley admin web page' -ErrorAction SilentlyContinue
+Remove-NetFirewallRule -DisplayName 'Thessley admin web page VPN' -ErrorAction SilentlyContinue
+Remove-NetFirewallRule -DisplayName 'Thessley OpenSSH cloud access' -ErrorAction SilentlyContinue
 if ($RemoveData) {
     Remove-Item -Recurse -Force $base
     Write-Host 'Removed the program and all data.'
 } else {
-    foreach ($f in 'app', 'gate.cmd', 'thessley-pam-win.cmd') { Remove-Item -Recurse -Force (Join-Path $base $f) -ErrorAction SilentlyContinue }
+    foreach ($f in 'app', 'downloads', 'gate.cmd', 'thessley-pam-win.cmd') { Remove-Item -Recurse -Force (Join-Path $base $f) -ErrorAction SilentlyContinue }
     Write-Host "Removed the program. Approvers and the log are kept in $base (use -RemoveData to delete them)."
 }

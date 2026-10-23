@@ -12,11 +12,17 @@ and what has and has not been tested.
 
 For a guided Windows 11 setup, extract this ZIP and run `guided-install.ps1` from an **Administrator PowerShell**. It
 installs the core service and offers the optional web page, firewall rules, per-user SSH QR gate, and experimental
-Windows QR sign-in tile. SSH setup backs up and validates `sshd_config` and arms an automatic rollback; the sign-in
-tile has its own rollback. Keep a working SSH session and Windows PIN/password recovery available, then confirm only
+Windows QR sign-in tile. When OpenSSH is running, the wizard enables QR approval for current local accounts by default
+and preserves their existing key/password settings. Accounts without an enrolled phone can use the configured fallback
+until enrollment; afterward, QR approval is required. In **Admin → Users**, administrators can change each account's QR
+requirement, block SSH, and select its first factor. Changes require fresh admin phone approval, back up and validate
+`sshd_config`, and restart OpenSSH. Keep a working SSH session and Windows PIN/password recovery available while changing login settings; the sign-in
+tile has its own rollback. Confirm only
 after testing every selected login method with `C:\ProgramData\ThessleyPamWin\confirm-setup.ps1`. Python 3.10+ for all
 users is required; if it is missing, the wizard offers to install Python 3.13 with winget. It detects a missing
 OpenSSH service and stops before changing SSH policy.
+For cloud hosts, choose Cloud access in the wizard; it can open the Windows firewall for TCP 22 and 47810 from any
+remote address, with TCP 47820 optional. Set the matching provider security-group rules separately.
 
 The installer builds the new app and its pinned dependencies in a private staging directory, import-checks them, then
 swaps them in. If the service or previously enabled web task fails its startup check, it restores the prior app and

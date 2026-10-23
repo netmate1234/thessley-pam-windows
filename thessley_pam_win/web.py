@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import base64
 import datetime
+import errno
 import hashlib
 import hmac
 import html
@@ -45,7 +46,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
-from . import approve, enroll, grants, machine, store
+from . import enroll, grants, machine, ssh_policy, store
 
 TTY_LOGIN, TTY_CHANGE, TTY_DEVICE = "web", "web-change", "add-device"  # what approve.run is told (it names them for the apps)
 
@@ -60,7 +61,7 @@ MAX_FLOWS = 40
 WEB_WAIT = 180          # seconds to approve a sign-in or a change (a person at a browser, the device in a pocket)
 WEB_CONFIRM_WAIT = 180  # seconds to compare the codes and press the button when adding a device
 WEB_ENROLL_WAIT = 300   # seconds the new device has to scan the code
-
+SERVICE_HOST, SERVICE_PORT = "127.0.0.1", 47800
 
 def now() -> float:
     return time.time()
@@ -73,23 +74,26 @@ _ADMIN_CACHE: dict = {"at": 0.0, "names": set()}
 
 def admin_names() -> set[str]:
     """The members of the local Administrators group (by its well-known SID, so any language), as plain account names."""
-    if now() - _ADMIN_CACHE["at"] < 120:
-        return _ADMIN_CACHE["names"]
-    names: set[str] = set()
-    try:
-        out = subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command",
-             "Get-LocalGroupMember -SID S-1-5-32-544 | ForEach-Object { $_.Name }"],
-            capture_output=True, text=True, errors="replace", timeout=20).stdout
-        for line in out.splitlines():
-            try:
-                names.add(store.normalize_user(line))
-            except ValueError:
-                continue
-    except (OSError, subprocess.TimeoutExpired):
-        pass
-    _ADMIN_CACHE.update(at=now(), names=names)
-    return names
+    if now() - _ADMIN_CACHE["at"] >= 120:
+        names: set[str] = set()
+        system_root = os.environ.get("SystemRoot", r"C:\Windows")
+        powershell = os.path.join(system_root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+        if not os.path.isfile(powershell):
+            powershell = "powershell.exe"
+        try:
+            result = subprocess.run(
+                [powershell, "-NoProfile", "-NonInteractive", "-Command",
+                 "Get-LocalGroupMember -SID S-1-5-32-544 | ForEach-Object { $_.Name }"],
+                capture_output=True, text=True, errors="replace", timeout=20)
+            for line in result.stdout.splitlines():
+                try:
+                    names.add(store.normalize_user(line))
+                except ValueError:
+                    continue
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        _ADMIN_CACHE.update(at=now(), names=names)
+    return set(_ADMIN_CACHE["names"]) | grants.web_admins()
 
 
 def is_admin(username: str) -> bool:
@@ -113,6 +117,9 @@ class Flow:
         self.state = "starting"   # starting, waiting, confirm (enrolment: codes shown), approved, refused, timeout, done, failed
         self.lines: list[str] = []
         self.link = ""
+        self.qr_path = ""
+        self.qr_size = 0
+        self.qr_rows: list[str] = []
         self.code = ""
         self.label = ""
         self.created = now()
@@ -139,17 +146,20 @@ class Flow:
 
 
 class Session:
-    def __init__(self, user: str, minutes: int):
+    def __init__(self, user: str, minutes: int, bootstrap: bool = False):
         self.token = secrets.token_urlsafe(32)
         self.csrf = secrets.token_urlsafe(24)
         self.user = user
         self.created = self.last = now()
         self.minutes = minutes
         self.flash = ""
+        self.bootstrap = bootstrap
+        self.bootstrap_flow_id = ""
 
     def valid(self) -> bool:
         t = now()
-        return t - self.last < self.minutes * 60 and t - self.created < SESSION_MAX_SECONDS
+        absolute_limit = grants.WEB_BOOTSTRAP_SECONDS if self.bootstrap else SESSION_MAX_SECONDS
+        return t - self.last < self.minutes * 60 and t - self.created < absolute_limit
 
 
 class WebApp:
@@ -237,14 +247,69 @@ class WebApp:
     def _approval_thread(self, flow: Flow, tty: str, ip: str) -> None:
         flow.state = "waiting"
         try:
-            # never a pass, and none granted: a web sign-in or a change must be approved afresh each time
-            ok = approve.run(flow.user, ip, tty, flow.say, self.log, port=approve.PORT, use_pass=False, grant_pass=False,
-                             wait=WEB_WAIT)
+            # The SYSTEM service owns the one phone listener. Routing through it lets concurrent web approvals
+            # share TCP 47810 instead of selecting a fallback port.
+            ok = self._service_flow(flow, "web-approve", rhost=ip,
+                                    service={TTY_CHANGE: "web-change", TTY_DEVICE: "add-device"}.get(tty, "web"))
         except Exception as exc:  # strict: any trouble is a refusal
             flow.say(f"error: {exc!r}")
             ok = False
         text = "\n".join(flow.lines)
         flow.state = "approved" if ok else ("timeout" if "no answer" in text else "refused")
+
+    def _service_flow(self, flow: Flow, op: str, *, rhost: str = "", service: str = "") -> bool:
+        """Relay one web flow through the SYSTEM daemon, which owns the shared TCP 47810 listener."""
+        request = {"op": op, "user": flow.user}
+        if rhost:
+            request["rhost"] = rhost
+        if service:
+            request["service"] = service
+        try:
+            sock = socket.create_connection((SERVICE_HOST, SERVICE_PORT), timeout=5)
+        except OSError as exc:
+            flow.say(f"The approval service is not available: {exc}")
+            return False
+
+        def cancel_socket():
+            flow.cancel.wait()
+            if flow.cancel.is_set():
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+
+        watcher = threading.Thread(target=cancel_socket, daemon=True)
+        watcher.start()
+        try:
+            sock.settimeout(None)
+            stream = sock.makefile("rw", encoding="utf-8", newline="\n")
+            stream.write(json.dumps(request) + "\n")
+            stream.flush()
+            for raw in stream:
+                message = json.loads(raw)
+                if "say" in message:
+                    flow.say(message["say"])
+                if "qr_matrix" in message:
+                    flow.qr_rows = str(message["qr_matrix"]).split("/")
+                if "ask" in message:
+                    flow.state = "confirm"
+                    flow.answer = None
+                    flow.answered.clear()
+                    flow.answered.wait(max(1, int(message.get("timeout", WEB_CONFIRM_WAIT))))
+                    answer = "yes" if flow.answer is True and not flow.cancel.is_set() else "no"
+                    stream.write(json.dumps({"answer": answer}) + "\n")
+                    stream.flush()
+                if message.get("done"):
+                    return bool(message.get("ok"))
+        except (OSError, ValueError, TypeError) as exc:
+            if not flow.cancel.is_set():
+                flow.say(f"Approval service connection ended: {exc}")
+        finally:
+            try:
+                sock.close()
+            except OSError:
+                pass
+        return False
 
     def usable(self, user: str) -> bool:
         """An account with at least one approver that may approve (approve.run refuses the rest, but say so up front)."""
@@ -276,17 +341,15 @@ class WebApp:
         if flow is None:
             return None
 
-        def ask_yes(prompt: str, timeout: float) -> bool:
-            flow.state = "confirm"
-            flow.answered.wait(timeout)
-            return flow.answer is True and not flow.cancel.is_set()
-
         def work():
             flow.state = "waiting"
             device = None
             try:
-                device = enroll.run(user, flow.say, ask_yes, port=approve.PORT, cancel=flow.cancel, show_link=True,
-                                    wait=WEB_ENROLL_WAIT, confirm_wait=WEB_CONFIRM_WAIT)
+                if self._service_flow(flow, "web-enroll"):
+                    stored = [d for d in store.devices(user) if flow.label and d.get("label") == flow.label
+                              and (d.get("enrolled_at") or 0) >= int(flow.created)]
+                    if stored:
+                        device = stored[-1]
             except Exception as exc:
                 flow.say(f"error: {exc!r}")
             if not device:  # whatever went wrong, a device that was stored during this flow counts as added
@@ -320,8 +383,9 @@ class WebApp:
                     flow.result_url, flow.flash = "/keys", f"That did not work: {exc}"
             return flow.result_url, flow.flash
 
-    def new_session(self, user: str) -> Session:
-        s = Session(user, self.settings()["session_minutes"])
+    def new_session(self, user: str, bootstrap: bool = False) -> Session:
+        # A bootstrap session can only enroll the first device and lasts ten minutes.
+        s = Session(user, 10 if bootstrap else self.settings()["session_minutes"], bootstrap=bootstrap)
         with self.lock:
             self.sessions[s.token] = s
         return s
@@ -404,7 +468,22 @@ class WebApp:
             if name == "self_enroll":
                 grants.set_self_enroll_first(value == "on")
                 return "/admin", "Users enrolling their own first approver: " + ("on." if value == "on" else "off.")
+            if name == "ssh_fallback_unenrolled":
+                grants.set_ssh_fallback_unenrolled(value == "on")
+                return "/admin", "Unenrolled-account SSH fallback: " + ("on." if value == "on" else "off.")
             raise ValueError("unknown setting")
+        return run
+
+    def change_ssh_access(self, username: str, qr_enabled: bool, blocked: bool, factor: str):
+        target = store.normalize_user(username)
+        if factor not in ("native", "key", "password", "key-password"):
+            raise ValueError("Choose existing OpenSSH settings, SSH key, account password, or both.")
+
+        def run():
+            backup = ssh_policy.set_access(target, qr_enabled, blocked, factor)
+            state = f"SSH {'blocked' if blocked else 'allowed'}; QR {'required when enrolled' if qr_enabled else 'not required'}"
+            self.log(f"web page: {state} for SSH account {target}; backup {backup}", False)
+            return "/admin", f"{state} for {target}. sshd was validated and restarted; config backup: {backup}"
         return run
 
     # -- per-key details
@@ -570,16 +649,28 @@ def ensure_cert(cert_path: str, key_path: str, ips: list[str]) -> str:
     return hashlib.sha256(leaf.public_bytes(serialization.Encoding.DER)).hexdigest()
 
 
-def qr_svg(link: str) -> bytes:
-    """The QR code for a link as an SVG image (the qrcode library, which the service already needs)."""
+def qr_vector(link: str) -> tuple[int, str, list[str]]:
+    """Return QR modules and an SVG path from the encoded module matrix."""
     import qrcode
-    import qrcode.image.svg
-    q = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_M, border=2, image_factory=qrcode.image.svg.SvgPathImage)
+    q = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_M, border=4)
     q.add_data(link)
     q.make(fit=True)
-    buf = io.BytesIO()
-    q.make_image().save(buf)
-    return buf.getvalue()
+    matrix = q.get_matrix()
+    size = len(matrix)
+    cells = "".join(f"M{x} {y}h1v1h-1z" for y, row in enumerate(matrix)
+                    for x, dark in enumerate(row) if dark)
+    rows = ["".join("1" if dark else "0" for dark in row) for row in matrix]
+    return size, cells, rows
+
+
+def qr_svg(link: str) -> bytes:
+    """Build a simple SVG image, suitable for direct download or an image viewer."""
+    size, cells, _ = qr_vector(link)
+    svg = (f'<svg xmlns="http://www.w3.org/2000/svg" width="520" height="520" '
+           f'viewBox="0 0 {size} {size}" shape-rendering="crispEdges">'
+           '<rect width="100%" height="100%" fill="#fff"/>'
+           f'<path fill="#000" d="{cells}"/></svg>')
+    return svg.encode("ascii")
 
 
 def journal_lines() -> list[str]:
@@ -650,6 +741,8 @@ h1{font-size:1.5rem;line-height:1.25;margin:.2rem 0;overflow-wrap:anywhere}h2{fo
 nav{display:flex;align-items:center;flex-wrap:wrap;gap:4px 14px;margin:6px 0 14px}
 nav a,.link{color:var(--accent);text-decoration:none}nav a{display:inline-flex;align-items:center;min-height:44px}nav form{margin-left:auto}nav button{min-height:44px}
 .card{min-width:0;overflow-wrap:anywhere;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin:10px 0}
+.user-section{margin:30px 0 38px;padding-bottom:18px;border-bottom:2px solid var(--line)}
+.user-section h3{margin:0 0 .45rem}.user-section>p{margin:0 0 14px}
 .dim{color:var(--dim);font-size:.9rem}.ok{color:var(--ok)}.bad{color:var(--danger)}
 input[type=text]{width:100%;padding:10px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);font-size:1rem}
 button{min-height:44px;padding:9px 14px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--fg);font-size:.95rem;cursor:pointer}
@@ -659,7 +752,7 @@ button.primary{background:var(--accent);border-color:var(--accent);color:#fff}bu
 .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:8px;min-width:0}.row form{display:flex;gap:8px;flex-wrap:wrap;align-items:center;max-width:100%;min-width:0}
 .flash{border-left:4px solid var(--ok);padding:8px 12px;margin:10px 0;background:var(--card)}
 code,.mono{font-family:ui-monospace,monospace;word-break:break-all;font-size:.85rem}
-.qr{display:block;margin:12px auto;background:#fff;padding:6px;border-radius:8px;width:min(100%,520px);max-width:100%;height:auto}
+.qr{display:block;margin:12px auto;background:#fff;padding:6px;border-radius:8px;width:min(100%,520px);max-width:100%;height:auto;aspect-ratio:1;object-fit:contain;image-rendering:pixelated}
 table{width:100%;border-collapse:collapse}td{padding:8px 6px;border-bottom:1px solid var(--line);vertical-align:top;font-size:.92rem;overflow-wrap:anywhere}
 .table-wrap{width:100%;max-width:100%;overflow-x:auto;overscroll-behavior-x:contain;-webkit-overflow-scrolling:touch}
 .key-details{margin-top:8px;border-top:1px solid var(--line)}
@@ -708,10 +801,14 @@ def esc(value) -> str:
 def page(title: str, body: str, nonce: str, session: Session | None = None, admin: bool = False) -> str:
     nav = ""
     if session:
-        nav = ('<nav><a href="/keys">Your keys</a><a href="/log">Activity</a>'
-               + ('<a href="/admin">Admin</a>' if admin else "")
-               + f'<form method="post" action="/logout" style="display:inline"><input type="hidden" name="csrf" value="{esc(session.csrf)}">'
-                 '<button>Sign out</button></form></nav>')
+        if session.bootstrap:
+            nav = (f'<nav><form method="post" action="/logout" style="display:inline"><input type="hidden" name="csrf" value="{esc(session.csrf)}">'
+                   '<button>Cancel setup</button></form></nav>')
+        else:
+            nav = ('<nav><a href="/keys">Your keys</a><a href="/log">Activity</a>'
+                   + ('<a href="/admin">Admin</a>' if admin else "")
+                   + f'<form method="post" action="/logout" style="display:inline"><input type="hidden" name="csrf" value="{esc(session.csrf)}">'
+                     '<button>Sign out</button></form></nav>')
     who = f'<span class="dim">Signed in as {esc(session.user)}</span>' if session else ""
     # On every page: opens the Thessley Passkey app on the computer or device this browser runs on (no request needed).
     opener = '<a class="btn small" href="thessleypam://open">Open the Thessley app</a>'
@@ -738,6 +835,32 @@ def login_page(message: str = "") -> str:
             '<div class="row"><button class="primary">Continue</button></div></form></div>')
 
 
+def bootstrap_page(token: str, message: str = "") -> str:
+    safe_token = token if re.fullmatch(r"[0-9a-f]{64}", token or "") else ""
+    return (flash_html(message) + '<div class="card"><h2 style="margin-top:0">First phone setup</h2>'
+            '<p class="dim">Enter the one-time setup password printed by the installer. It can only enroll the first phone '
+            'for this administrator, expires after ten minutes, and cannot open settings or other accounts.</p>'
+            '<form method="post" action="/bootstrap"><input type="hidden" name="token" value="' + esc(safe_token) + '">'
+            '<label for="code" class="dim">One-time setup password</label>'
+            '<input type="password" id="code" name="code" inputmode="numeric" autocomplete="one-time-code" '
+            'pattern="[0-9]{8}" maxlength="8" required autofocus>'
+            '<div class="row"><button class="primary">Continue to first phone setup</button></div></form></div>')
+
+
+def bootstrap_setup_page(session: Session, flash: str = "") -> str:
+    return (flash_html(flash) + '<div class="card"><h2 style="margin-top:0">Enroll the first phone</h2>'
+            f'<p class="dim">This one-time setup is limited to the first phone for {esc(session.user)}. '
+            'It cannot view keys or change settings. The setup session ends in ten minutes.</p>'
+            f'<form method="post" action="/bootstrap/enroll"><input type="hidden" name="csrf" value="{esc(session.csrf)}">'
+            '<div class="row"><button class="primary">Start phone enrollment</button></div></form></div>')
+
+
+def bootstrap_done_page() -> str:
+    return ('<div class="card"><h2 style="margin-top:0">First phone enrolled</h2>'
+            '<p>Your one-time setup link is spent. Sign in with the new phone to manage keys and settings.</p>'
+            '<p><a class="btn primary" href="/">Go to sign in</a></p></div>')
+
+
 def wait_page(flow: Flow, nonce: str, session: Session | None, heading: str, note: str) -> str:
     script = """
 const id = %s;
@@ -759,8 +882,25 @@ async function tick() {
           const open = el('a', 'Open this request in the Thessley app', 'btn'); open.href = s.link;
           live.append(open, el('p', 'On a computer or device that has the app, this opens it with this request ready.', 'dim'));
         }
-        const img = el('img', '', 'qr'); img.alt = 'QR code'; img.src = '/qr/' + id + '.svg';
-        live.append(img, el('p', 'Or open this link in the Thessley Passkey app (paste it, or run thessley-passkey respond):', 'dim'), el('p', s.link, 'mono'));
+        if (s.qr_rows && s.qr_size) {
+          const qr = el('canvas', '', 'qr'); qr.setAttribute('role', 'img'); qr.setAttribute('aria-label', 'QR code');
+          const modulePixels = Math.max(8, Math.ceil(520 / s.qr_size));
+          qr.width = qr.height = s.qr_size * modulePixels;
+          const ctx = qr.getContext('2d');
+          if (ctx) {
+            ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, qr.width, qr.height); ctx.fillStyle = '#000';
+            for (let y = 0; y < s.qr_rows.length; y++) {
+              const row = s.qr_rows[y];
+              for (let x = 0; x < row.length; x++) if (row[x] === '1') ctx.fillRect(x * modulePixels, y * modulePixels, modulePixels, modulePixels);
+            }
+            live.append(qr);
+          } else {
+            live.append(el('p', 'Your browser could not draw the QR code. Use the approval link below.', 'bad'));
+          }
+        } else {
+          live.append(el('p', 'The QR code is being prepared. Use the approval link below if it does not appear.', 'bad'));
+        }
+        live.append(el('p', 'Or open this link in the Thessley Passkey app (paste it, or run thessley-passkey respond):', 'dim'), el('p', s.link, 'mono'));
       } else if (!s.message) {
         live.append(el('p', 'Getting the request ready…', 'dim'));
       }
@@ -892,6 +1032,13 @@ def admin_page(viewer: Session, flash: str, listener_host: str = "") -> str:
               f'<div class="dim">An account with no approver at all can add its first one itself (thessley-pam-win enroll). More approvers always need an approval.</div>'
               f'<form method="post" action="/admin/set" class="row">{hidden}<input type="hidden" name="name" value="self_enroll">'
               f'<button name="value" value="{"off" if first else "on"}">Switch {"off" if first else "on"}</button></form></div>')
+    fallback = grants.ssh_fallback_unenrolled()
+    ssh_fallback = (f'<div class="card"><strong>SSH fallback when a user has never enrolled a phone</strong>: '
+                    f'<span class="{"ok" if fallback else "bad"}">{on(fallback)}</span>'
+                    '<div class="dim">When on, a QR-enabled account with no enrolled phone can still use its configured OpenSSH key/password. '
+                    'Once a phone is enrolled, QR approval is required. Accounts with a disabled or lost phone do not use this fallback.</div>'
+                    f'<form method="post" action="/admin/set" class="row">{hidden}<input type="hidden" name="name" value="ssh_fallback_unenrolled">'
+                    f'<button name="value" value="{"off" if fallback else "on"}">Switch {"off" if fallback else "on"}</button></form></div>')
     session = grants.web_settings()["session_minutes"]
     settings = grants.web_settings()
     grace += (f'<div class="card"><strong>Stay signed in to this page</strong>: {session} minutes without activity'
@@ -926,19 +1073,68 @@ def admin_page(viewer: Session, flash: str, listener_host: str = "") -> str:
                   'turning it on disconnects browsers on other computers.</div>'
                   f'<form method="post" action="/admin/set" class="row">{hidden}<input type="hidden" name="name" value="localhost_only">'
                   f'<button name="value" value="{"off" if settings["localhost_only"] else "on"}">Switch {"off" if settings["localhost_only"] else "on"}</button></form></div>')
-    ssh_help = ("<div class='card'><strong>SSH login path on Windows</strong>"
-                "<p>Windows OpenSSH checks the account factor first, then starts the Thessley QR approval gate. "
-                "Choose that first factor in <code>sshd_config</code>: account password, SSH key, or key followed by account password. "
-                "Every gated path still needs phone approval.</p>"
-                "<p><strong>Difference from Linux:</strong> QR-only SSH and falling back to a password when QR approval fails "
-                "cannot be selected here; Windows starts the gate only after OpenSSH authentication has succeeded. "
-                "The admin page does not edit or restart <code>sshd</code>.</p>"
-                "<p>Generate a block with <code>thessley-pam-win sshd-config --user NAME --factor password</code>, "
-                "or use <code>--factor key</code> / <code>--factor key-password</code>. Review the block and keep a working "
-                "session open while applying it. Always back up the config and run <code>sshd -t</code> before restarting.</p></div>")
+    ssh_help = ("<div class='card'><strong>SSH login policy on Windows</strong>"
+                "<p>QR approval is enabled by default for local accounts. OpenSSH checks the account's configured key or password first. "
+                "If that account has never enrolled a phone, the fallback setting below lets its normal SSH login work so it can be set up. "
+                "After a phone is enrolled, QR approval is required. A disabled phone does not count as an unconfigured account.</p>"
+                "<p>Use <em>Block SSH</em> to deny that account regardless of its key, password, or phone. Clear both controls to restore ordinary SSH access. "
+                "Every change asks for a fresh admin phone approval, backs up <code>sshd_config</code>, validates it, and restarts OpenSSH.</p></div>")
+    ssh_accounts_html = ""
+    try:
+        accounts = ssh_policy.local_accounts()
+        active_policies = ssh_policy.policies()
+        custom_users = ssh_policy.custom_match_users()
+        rows = []
+        for account in accounts:
+            username = account["name"]
+            normalized = store.normalize_user(username)
+            factor = active_policies.get(normalized)
+            if factor == "manual" or normalized in custom_users:
+                blocked = normalized in ssh_policy.blocked_users()
+                blocked_checked = " checked" if blocked else ""
+                qr_checked = " checked" if factor != "manual" else ""
+                rows.append(
+                    "<form method='post' action='/admin/set' class='card ssh-policy-row'>" + hidden +
+                    "<input type='hidden' name='name' value='ssh_policy'>" +
+                    f"<input type='hidden' name='user' value='{esc(username)}'>" +
+                    "<input type='hidden' name='factor' value='native'>" +
+                    f"<label><input type='checkbox' name='enabled' value='on'{qr_checked}> Require QR approval</label> "
+                    f"<label><input type='checkbox' name='blocked' value='on'{blocked_checked}> Block SSH for <strong>{esc(username)}</strong></label> "
+                    f"<button>Save</button><div class='dim'>A custom <code>Match User</code> rule exists. Its current key/password settings are preserved; this page only adds or removes the QR gate and SSH block.</div></form>"
+                )
+                continue
+            device_ready = bool(store.active_devices(normalized))
+            qr_checked = " checked" if normalized in active_policies else ""
+            blocked = normalized in ssh_policy.blocked_users()
+            blocked_checked = " checked" if blocked else ""
+            factor = factor or "native"
+            device_note = ("An active phone is enrolled; QR approval is required." if device_ready else
+                           f"No active phone. The configured fallback applies until {esc(username)} enrolls one. "
+                           f"<a href='/keys?user={esc(username)}'>Manage {esc(username)}'s devices</a>.")
+            rows.append(
+                "<form method='post' action='/admin/set' class='card ssh-policy-row'>" + hidden +
+                "<input type='hidden' name='name' value='ssh_policy'>" +
+                f"<input type='hidden' name='user' value='{esc(username)}'>" +
+                f"<label><input type='checkbox' name='enabled' value='on'{qr_checked}> Require QR approval</label> "
+                f"<label><input type='checkbox' name='blocked' value='on'{blocked_checked}> Block SSH for <strong>{esc(username)}</strong></label> "
+                "<label>First factor <select name='factor'>" + "".join(
+                    f"<option value='{value}'{' selected' if factor == value else ''}>{label}</option>"
+                    for value, label in (("native", "Current OpenSSH settings"), ("key", "SSH key"), ("password", "Account password"),
+                                         ("key-password", "SSH key and account password"))) +
+                f"</select></label> <button>Save</button><div class='dim'>{device_note}</div></form>"
+            )
+        if rows:
+            ssh_accounts_html = ("<section class='user-section'><h3>Users</h3><p class='dim'>QR approval is the default. "
+                                "The first factor dropdown selects the existing OpenSSH method or an explicit key/password requirement. "
+                                "Domain accounts are not listed. You can block each local account independently.</p>" +
+                                "".join(rows) + "</section>")
+        else:
+            ssh_accounts_html = "<p class='dim'>No supported enabled local accounts were found.</p>"
+    except Exception as exc:
+        ssh_accounts_html = f"<p class='bad'>Could not read local SSH accounts: {esc(str(exc))}</p>"
     return (flash_html(flash) + "<h2>Settings for this computer</h2>"
             "<p class='dim'>Only administrators see this page. Every change asks your device for a fresh approval.</p>"
-            + ssh_help + limits + logging + local_only + grace + toggle + f"<p class='dim'>Passes held right now: {esc(len(grants.all_passes()))}.</p>")
+            + ssh_help + ssh_accounts_html + ssh_fallback + limits + logging + local_only + grace + toggle + f"<p class='dim'>Passes held right now: {esc(len(grants.all_passes()))}.</p>")
 
 
 # ---- HTTP ------------------------------------------------------------------------------------------------------
@@ -1036,6 +1232,8 @@ def make_handler(app: WebApp):
                 return None
             if f.kind == "login":
                 return f if hmac.compare_digest(self.cookies().get("thessley_wait", ""), f.secret) else None
+            if s is not None and s.bootstrap:
+                return f if f.kind == "enroll" and s.bootstrap_flow_id == f.id and s.user == f.owner else None
             return f if s is not None and s.user == f.owner else None
 
         # -- routes
@@ -1043,8 +1241,40 @@ def make_handler(app: WebApp):
             path = urlsplit(self.path)
             route, query = path.path, {k: v[0] for k, v in parse_qs(path.query).items()}
             s = self.session()
+            if s is not None and s.bootstrap:
+                allowed = (route in ("/", "/bootstrap", "/bootstrap/setup", "/bootstrap/done")
+                           or re.fullmatch(r"/(?:wait|status)/[0-9a-f]{32}", route)
+                           or re.fullmatch(r"/qr/[0-9a-f]{32}\.svg", route)
+                           or re.fullmatch(r"/enroll/[0-9a-f]{32}", route))
+                if not allowed:
+                    return self.redirect("/bootstrap/setup")
             if route == "/":
+                if s is not None and s.bootstrap:
+                    return self.redirect("/bootstrap/setup")
                 return self.redirect("/keys") if s else self.html(200, "Sign in", login_page())
+            if route == "/bootstrap":
+                return self.html(200, "First phone setup", bootstrap_page(query.get("token", "")))
+            token_route = re.fullmatch(r"/([0-9a-f]{64})", route)
+            if token_route:
+                return self.html(200, "First phone setup", bootstrap_page(token_route.group(1)))
+            if route == "/bootstrap/setup":
+                s = self.need_session()
+                if s is None:
+                    return
+                if not s.bootstrap:
+                    return self.redirect("/keys")
+                if not is_admin(s.user) or store.devices(s.user):
+                    app.drop_session(s.token)
+                    return self.redirect("/bootstrap/done", [self.cookie("thessley_session", "", 0)])
+                if s.bootstrap_flow_id:
+                    flow = app.flow(s.bootstrap_flow_id)
+                    if flow is not None and flow.state not in ("failed", "timeout", "refused"):
+                        return self.redirect(f"/wait/{flow.id}")
+                    s.bootstrap_flow_id = ""
+                flash, s.flash = s.flash, ""
+                return self.html(200, "Enroll first phone", bootstrap_setup_page(s, flash), s)
+            if route == "/bootstrap/done":
+                return self.html(200, "First phone enrolled", bootstrap_done_page())
             m = re.fullmatch(r"/wait/([0-9a-f]{32})", route)
             if m:
                 f = self.flow_for(m.group(1), s)
@@ -1113,6 +1343,20 @@ def make_handler(app: WebApp):
             route = urlsplit(self.path).path
             data = self.form()
             s = self.session()
+            if route == "/bootstrap":
+                if not app.rate_ok(self.ip()):
+                    return self.html(429, "Slow down", bootstrap_page(data.get("token", ""),
+                                    "Too many setup attempts from this address. Wait a few minutes."))
+                if not grants.web_settings()["enabled"]:
+                    return self.html(200, "First phone setup", bootstrap_page(data.get("token", ""),
+                                    "The web page is off. Start setup again from the installer."))
+                user = grants.consume_web_bootstrap(data.get("token", ""), data.get("code", ""))
+                if user is None or not is_admin(user) or store.devices(user):
+                    return self.html(200, "First phone setup", bootstrap_page(data.get("token", ""),
+                                    "That one-time link or password is invalid, expired, or already used."))
+                session = app.new_session(user, bootstrap=True)
+                app.log(f"web page: one-time first-device setup started for {user}", False)
+                return self.redirect("/bootstrap/setup", [self.cookie("thessley_session", session.token)])
             if route == "/login":
                 user = (data.get("user") or "").strip()
                 if not app.rate_ok(self.ip()):
@@ -1127,8 +1371,26 @@ def make_handler(app: WebApp):
                 return self.redirect("/", [self.cookie("thessley_session", "", 0)])
             if s is None:
                 return self.redirect("/")
+            if s.bootstrap and route != "/bootstrap/enroll" and not re.fullmatch(r"/enroll/[0-9a-f]{32}/confirm", route):
+                return self.redirect("/bootstrap/setup")
             if not self.csrf_ok(s, data):
                 return
+            if route == "/bootstrap/enroll":
+                if not s.bootstrap or not is_admin(s.user):
+                    return self.redirect("/")
+                if store.devices(s.user):
+                    app.drop_session(s.token)
+                    return self.redirect("/bootstrap/done", [self.cookie("thessley_session", "", 0)])
+                if s.bootstrap_flow_id:
+                    flow = app.flow(s.bootstrap_flow_id)
+                    if flow is not None and flow.state not in ("failed", "timeout", "refused"):
+                        return self.redirect(f"/wait/{flow.id}")
+                    s.bootstrap_flow_id = ""
+                flow = app.start_enroll(s.user, owner=s.user)
+                if flow is None:
+                    return self.html(503, "Busy", flash_html("Enrollment could not start. Try again."), s)
+                s.bootstrap_flow_id = flow.id
+                return self.redirect(f"/wait/{flow.id}")
             m = re.fullmatch(r"/enroll/([0-9a-f]{32})/confirm", route)
             if m:
                 f = self.flow_for(m.group(1), s)
@@ -1195,6 +1457,21 @@ def make_handler(app: WebApp):
 
         def admin_action(self, data: dict, s: Session) -> None:
             name, value = data.get("name", ""), (data.get("value") or "").strip()
+            if name == "ssh_policy":
+                target, factor = (data.get("user") or "").strip(), (data.get("factor") or "native").strip()
+                try:
+                    target_key = store.normalize_user(target)
+                    known = {store.normalize_user(row["name"]) for row in ssh_policy.local_accounts()}
+                except (ValueError, RuntimeError, OSError):
+                    return self.html(400, "Not valid", flash_html("Could not verify that local Windows account."), s)
+                if target_key not in known:
+                    return self.html(400, "Not valid", flash_html("Choose an enabled local Windows account from this page."), s)
+                if factor not in ("native", "key", "password", "key-password"):
+                    return self.html(400, "Not valid", flash_html("Choose the current OpenSSH settings, an SSH key, account password, or both."), s)
+                enabled = data.get("enabled") == "on"
+                blocked = data.get("blocked") == "on"
+                description = f"updating SSH access for account {target_key}"
+                return self.start_change(s, description, app.change_ssh_access(target_key, enabled, blocked, factor))
             if name == "grace":
                 try:
                     hours = float(value)
@@ -1219,7 +1496,7 @@ def make_handler(app: WebApp):
                 if not valid:
                     return self.html(400, "Not valid", flash_html("Check the resource or rotation values."), s)
                 value = f"{first},{second}"
-            elif name == "self_enroll":
+            elif name in ("self_enroll", "ssh_fallback_unenrolled"):
                 if value not in ("on", "off"):
                     return self.html(400, "Not valid", flash_html("Choose on or off."), s)
             elif name == "localhost_only":
@@ -1249,6 +1526,12 @@ def make_handler(app: WebApp):
                 return self.json({"state": "gone", "message": "This request is no longer here. Start again.", "bad": True})
             extra = None
             out = {"state": f.state, "link": f.link, "code": f.code, "message": "", "bad": False}
+            if f.link:
+                with f.lock:
+                    if not f.qr_rows:
+                        f.qr_size, f.qr_path, f.qr_rows = qr_vector(f.link)
+                    out["qr_size"] = f.qr_size
+                    out["qr_rows"] = f.qr_rows
             if f.kind == "login" and f.state == "approved":
                 session = app.new_session(f.user)
                 f.state = "done"
@@ -1268,9 +1551,15 @@ def make_handler(app: WebApp):
             elif f.state == "failed":
                 out.update(message=self.failure_text(f), bad=True)
             elif f.state == "done" and f.kind == "enroll":
-                if s is not None:
+                if s is not None and s.bootstrap:
+                    app.drop_session(s.token)
+                    extra = [self.cookie("thessley_session", "", 0)]
+                    out.update(next="/bootstrap/done")
+                elif s is not None:
                     s.flash = f"Added {f.label or 'the new device'}."
-                out.update(next="/keys" if s is None or f.user == s.user else f"/keys?user={f.user}")
+                    out.update(next="/keys" if f.user == s.user else f"/keys?user={f.user}")
+                else:
+                    out.update(next="/keys")
             self.json(out, extra)
 
     return Handler
@@ -1338,15 +1627,48 @@ def main() -> int:
 
 def serve() -> int:
     app = WebApp()
+    last_network_log = 0.0
     while True:
         st = grants.web_settings()
         if not st["enabled"]:
             print("The admin web page is switched off (thessley-pam-win web on).")
             return 0
-        ip = "127.0.0.1" if st["localhost_only"] else (st["listen"] or machine.lan_ip())
+        local_only = st["localhost_only"]
+        try:
+            ip = "127.0.0.1" if local_only else (st["listen"] or machine.lan_ip())
+        except OSError as exc:
+            now = time.monotonic()
+            if now - last_network_log >= 30:
+                print(f"Waiting for a network address before starting the admin page: {exc}", flush=True)
+                last_network_log = now
+            time.sleep(1)
+            continue
+        if not local_only and not st["listen"]:
+            try:
+                address = ipaddress.ip_address(ip)
+            except ValueError:
+                address = None
+            if address is None or address.is_loopback or address.is_link_local or address.is_unspecified:
+                now = time.monotonic()
+                if now - last_network_log >= 30:
+                    print("Waiting for DHCP to provide a usable LAN address before starting the admin page.", flush=True)
+                    last_network_log = now
+                time.sleep(1)
+                continue
         cert, key = (st["cert"], st["key"]) if st["cert"] and st["key"] else default_cert_paths()
         fingerprint = ensure_cert(cert, key, [ip, "127.0.0.1"])
-        httpd = make_server(app, ip, st["port"], cert, key)
+        try:
+            httpd = make_server(app, ip, st["port"], cert, key)
+        except OSError as exc:
+            # A DHCP address can become available just before Windows finishes assigning it to the interface.
+            if getattr(exc, "winerror", None) != 10049 and getattr(exc, "errno", None) != errno.EADDRNOTAVAIL:
+                raise
+            now = time.monotonic()
+            if now - last_network_log >= 30:
+                print(f"Waiting for the LAN address to become bindable before starting the admin page: {exc}", flush=True)
+                last_network_log = now
+            time.sleep(1)
+            continue
         app.httpd = httpd
         app.rebind_requested = False
         print(f"Thessley admin page: https://{ip}:{st['port']}/   certificate SHA-256 {fingerprint}", flush=True)

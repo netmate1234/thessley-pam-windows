@@ -13,9 +13,11 @@ Do these in an **administrator PowerShell**, in the repository folder, after pul
 
        powershell -ExecutionPolicy Bypass -File install\install.ps1 -Python "C:\Program Files\Python313\python.exe" -OpenFirewall -OpenWebFirewall
 
-   `-OpenWebFirewall` is new: it allows TCP 47820 from the local subnet (Private networks; add `-FirewallProfile Any` for
-   networks Windows calls Public). Leave it out and add your own rule if you prefer. Nothing else is touched. An upgrade
-   keeps the page on if it was already on.
+   `-OpenWebFirewall` allows TCP 47820 from the local subnet on all Windows profiles by default. For a cloud host,
+   `-CloudAccess` changes requested Thessley listener rules to any remote IP; `-OpenSshFirewall` separately opens SSH
+   port 22 from any IP. The guided installer asks before enabling each port and keeps remote web access (47820) opt-in.
+   Cloud-provider security-group rules still need to allow the selected ports. Pass `-FirewallProfile Private` to
+   restrict the Thessley rules to Private networks. An upgrade keeps the page on if it was already on.
 
 2. **Switch the page on** and read its address and certificate fingerprint:
 
@@ -32,6 +34,23 @@ Do these in an **administrator PowerShell**, in the repository folder, after pul
    `thessley-passkey respond 'LINK' --approve`, or paste the link into the desktop app. The account needs at least one
    approver enrolled (`thessley-pam-win enroll`).
 
+### First phone setup without an enrolled approver
+
+The guided installer enables the web page before it configures optional QR SSH or the Windows sign-in tile. If the current
+administrator has no device yet, it can issue a one-time first-phone setup link:
+
+    & "C:\ProgramData\ThessleyPamWin\thessley-pam-win.cmd" web bootstrap --user martin
+
+The guided installer shows the ordinary Admin page address once. For first-phone setup it then prints a separate enrollment
+URL in the form `https://WINDOWS-IP:47820/TOKEN`, followed by an eight-digit setup code. Copy the complete line labelled
+**FIRST-PHONE ENROLLMENT LINK**. Open that link, enter the code, and start enrollment in the browser. The link and code expire
+after ten minutes and can be used once. The old `/bootstrap?token=...` form is still accepted for an unexpired link. The
+resulting browser session can only enroll that administrator's first phone; it cannot view keys, change settings, or manage
+other accounts. After the phone is added, the temporary session ends and normal web sign-in uses phone approval.
+
+This bootstrap is only available for a local administrator with no device records. It cannot replace a phone after one has
+already been enrolled. Keep the link and setup password private and use them only on a trusted network.
+
 Switch it off any time: `thessley-pam-win web off`. Other settings: `web listen ADDRESS` (default: this computer's LAN address;
 `0.0.0.0` listens everywhere, only for networks you trust), `web port N`, `web session MINUTES` (15 idle, 8 h at most).
 
@@ -44,7 +63,7 @@ address (or the computer's LAN address when set to `auto`).
 
 The page can listen on this computer only, so nothing on the network can reach it, and you open it through an ssh
 tunnel (your ssh login is approved with a device too). Approvals are not affected: the device talks to the short-lived
-listener on this computer's LAN address (ports 47810-47819), never to the page, so the QR code and the link work as before.
+listener on this computer's LAN address (TCP port 47810), never to the page, so the QR code and the link work as before.
 
     thessley-pam-win web listen 127.0.0.1
     thessley-pam-win web on                       (restarts the page with the new address)
@@ -68,7 +87,10 @@ The page opens in dark mode. Use the **Light mode** button in the header to swit
   (the grace hours), each with an **End this pass** button, and **End all passes**. The next login then asks your device again.
   Ending a pass only takes access away, so it needs no fresh approval.
 - **Activity:** the newest 3,000 approvals, refusals, pass grants and enrolments from `service.log` and its five bounded rotations, shown 20 per page (administrators can see everyone's). Reuse of an existing pass is not logged.
-- Administrators can set maximum concurrent web requests, the bounded IP rate-limit cache, and log file size/rotation count under **Admin**. Dependency versions are pinned in `requirements.lock`; the installer checks the installed versions and dependency consistency.
+- Administrators can set maximum concurrent web requests, the bounded IP rate-limit cache, and log file size/rotation count under **Admin**. Dependency versions are pinned in `requirements.lock` and installed into a private directory beside the app, leaving machine-wide Python unchanged.
+- The guided installer enables QR approval for current local accounts by default while preserving their configured OpenSSH factor. Until a phone is enrolled, the default fallback allows the account's existing key/password login; after enrollment, QR is required. Administrators manage each account from **Admin → Users**, with separate QR and **Block SSH** checkboxes. A custom exact `Match User NAME` rule is preserved while the QR command is added; complex custom rules remain unchanged. Every change asks for a fresh admin approval, backs up `C:\ProgramData\ssh\sshd_config`, validates it with OpenSSH, then restarts `sshd`; the page reports the backup path. The fallback can be switched off in Admin. Domain accounts are not listed.
+
+The ZIP packages are built with `python scripts/build_downloads.py` and distributed separately from the authenticated web GUI.
 
 ## TPM proof
 
@@ -106,7 +128,7 @@ needing an approval, adding an approver, who may do what, escaping, the log, key
 - `web on` / `web off` / `web status` start, stop and describe the scheduled task `ThessleyPamWinWeb` (they call `schtasks`).
 - *Administrators* are found with `Get-LocalGroupMember -SID S-1-5-32-544` (by SID, so in any language). If the Admin page does not
   show for an administrator, run that command by hand in PowerShell as SYSTEM-like context and send me the output.
-- The QR code image is drawn by the `qrcode` library's SVG output (installed by `install.ps1`).
+- The page draws the QR on a canvas from the QR modules. The text approval link remains available as a fallback.
 - The page's certificate lives in `C:\ProgramData\ThessleyPamWin\web\` and inherits the locked-down permissions of that folder.
 - The firewall rule for TCP 47820 (`-OpenWebFirewall`).
 

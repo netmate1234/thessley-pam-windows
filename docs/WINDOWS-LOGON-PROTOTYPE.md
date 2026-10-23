@@ -124,4 +124,4 @@ available, test QR sign-in, and confirm the rollback only after sign-in succeeds
 present, understand its pending action before starting another install. Phone enrollment is needed to complete QR
 sign-in setup, but it does not control whether the tile appears.
 
-The October 23, 2026 branding update gives the credential tile and QR viewer genuine alpha transparency in the rounded corners. The tile loads its 32-bit bitmap as a DIB section so Windows retains the alpha channel; the viewer uses the matching multi-size Thessley ICO.
+The Thessley sign-in-method tile uses an isolated shield-and-key mark on a pure-white field, without the blue rounded-square app tile or gray corners. The QR viewer separately remembers its most recently resized window dimensions in `HKLM\SOFTWARE\ThessleyPamWin\QrViewer` and clamps them to the current display work area when it opens.

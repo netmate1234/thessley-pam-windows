@@ -1,9 +1,10 @@
-# ssh to Windows 11: password first, then a phone or desktop-app approval
+# Windows SSH: existing key or password, then QR approval
 
-For chosen Windows accounts, `ssh` asks for the account's **password** (or accepts its **ssh key**, see
-"Key instead of password") and then shows a **QR code and a `thessleypam://` link**. The login continues only after an enrolled phone (or the Thessley Passkey desktop app) approves
-it with a signature. Optionally, one approval then counts for N hours from the same address or, in configurable cloud
-mode, from any client address (a "pass").
+For Windows accounts managed from **Admin → Users**, SSH first checks the configured OpenSSH factor (password, SSH key, or
+both). If the account has an enrolled phone, the gate shows a **QR code and a `thessleypam://` link**; login continues
+only after phone or desktop-app approval. If no phone has ever been enrolled, the default fallback allows the existing
+OpenSSH method so the account can be set up. An administrator can switch that fallback off. Optionally, one approval
+then counts for N hours from the same address or, in configurable cloud mode, from any client address (a "pass").
 
 This is the Windows counterpart of [thessley-pam-linux](../../thessley-pam-linux/docs/SSH.md). It speaks the same
 protocol, so the same phone app and the same desktop app (`thessley-passkey respond` / "Paste a link") approve it.
@@ -151,16 +152,24 @@ installer as two separate installs.
    keys, passes, certificates and web settings remain outside the app directory. It never modifies machine-wide Python,
    `sshd_config`, accounts or groups.
 
-   **Firewall note:** the installer option `-OpenFirewall` opens TCP 47810 from the local subnet on Private networks.
-   Standalone enrollment can use another port in the 47810–47819 range when the shared listener already occupies 47810.
+   **Firewall note:** the installer option `-OpenFirewall` opens TCP 47810 from the local subnet on all Windows network
+   profiles by default. Phone approval and enrollment share the service-owned TCP 47810 listener, including concurrent requests. The guided installer also asks for additional VPN client subnets, defaulting to
+   `10.8.0.0/24,10.8.1.0/24`. Answer `Y` or press Enter to allow both, `N` to skip, or enter custom comma-separated IPv4 CIDR subnets.
+   The installer applies the selected subnets to the phone approval port (47810) and, when enabled, the web page (47820). The source remains limited to those networks;
+   pass `-FirewallProfile Private` to restrict the rules to Private networks only.
+   Enrollment does not open or select a second phone port. Both the command-line and web enrollment flows register unique request paths on TCP 47810, so concurrent requests do not block the listener.
    Before enrollment, add this narrowly scoped inbound rule from an elevated PowerShell if your firewall blocks that
-   dynamic port:
+   approval and enrollment port:
 
-       New-NetFirewallRule -DisplayName 'Thessley phone approval and enrollment' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 47810-47819 -RemoteAddress LocalSubnet -Profile Any
+       New-NetFirewallRule -DisplayName 'Thessley phone approval and enrollment' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 47810 -RemoteAddress LocalSubnet -Profile Any
 
    This rule is limited to local-subnet sources, including when Windows classifies the network as Public. If you need
-   phone enrollment or approvals over a VPN, include the specific VPN client subnet in `-RemoteAddress`; do not use `Any`
-   for remote addresses. Remove the earlier Thessley TCP 47810 rule if it duplicates this rule.
+   phone enrollment or approvals over a VPN when using the manual rule, include the specific VPN client subnet in
+   `-RemoteAddress`. For a cloud host, the guided installer has a separate **cloud access** choice: it can allow TCP 22
+   (if selected), TCP 47810, and optionally TCP 47820 from any remote IP in the Windows firewall. It does not change
+   `sshd_config` or SSH authentication. The cloud provider's network firewall/security group must separately allow
+   TCP 22 and 47810; allow 47820 there only if remote web administration is wanted. The same applies to IPv6 rules.
+   Remove the earlier Thessley TCP 47810 rule if it duplicates this rule.
 
 3. **Enrol an approver.** An administrator can do it as below; users can also enrol themselves, without administrator rights
    (see "Enrolling without an administrator"). Administrator terminal (see "Second approver" for the desktop app):
@@ -251,7 +260,14 @@ before phone approval; generate it with `--factor key-password`.
 
 **Windows limitation:** unlike the Linux PAM module, this gate cannot provide QR-only authentication or let a user
 fall back to a password after phone approval fails. OpenSSH must accept a first factor before it launches the gate.
-The admin web page describes these choices but deliberately does not edit `sshd_config` or restart the SSH service.
+The guided installer enables QR approval by default for current local accounts while preserving their current OpenSSH
+key/password settings. Until an account enrolls a phone, the default fallback lets its configured SSH method work; after
+enrollment, QR approval is required. Administrators can manage accounts from **Admin → Users**. Each local account has
+separate **Require QR approval** and **Block SSH** checkboxes plus a first-factor selector. Clearing QR restores ordinary
+OpenSSH behavior; **Block SSH** denies the account regardless of its credentials. The fallback for accounts that have
+never enrolled a phone can be switched on or off in Admin. Each change requires fresh phone approval, backs up
+`sshd_config`, validates the new file with `sshd -t`, checks the effective `ForceCommand`, and restarts `sshd`; the page
+shows the backup path. Domain accounts are not listed by this control.
 
 On Windows the key must be where `sshd` looks, with permissions it accepts, or it is silently ignored:
 
@@ -431,5 +447,5 @@ Do those first on an account you can recover, with a second session open.
   on Automatic start). The cause was not determined.
 - **Notepad does not show `sshd_config`**: `C:\ProgramData` is hidden and the file has no extension. Use
   `notepad C:\ProgramData\ssh\sshd_config` from an administrator PowerShell.
-- Windows classes many home Wi-Fi networks as **Public**; the approval firewall rule is Private-only unless you install with
-  `-OpenFirewall -FirewallProfile Any` (still limited to the local subnet).
+- Windows classes many home Wi-Fi networks as **Public**. Installer-created firewall rules apply to all profiles by
+  default, while remaining limited to the local subnet. Use `-FirewallProfile Private` if you want Private-only rules.

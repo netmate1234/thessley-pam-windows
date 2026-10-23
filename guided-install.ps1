@@ -58,17 +58,58 @@ $sshCapability = Get-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
 $sshInstalled = $sshCapability.State -eq 'Installed'
 $sshdService = Get-Service -Name sshd -ErrorAction SilentlyContinue
 
-$openApprovalFirewall = Ask-YesNo 'Allow phone approvals to reach this PC on TCP 47810 from the local subnet?' $false
-$enableWeb = Ask-YesNo 'Install and enable the HTTPS admin web page on TCP 47820?' $false
-$openWebFirewall = $false
-if ($enableWeb) {
-    $openWebFirewall = Ask-YesNo 'Allow the local subnet to reach the web page on TCP 47820?' $false
+$cloudAccess = Ask-YesNo 'Is this a cloud host whose SSH clients and phone approvals may come from changing public IP addresses? Cloud mode opens selected Windows firewall ports to any remote IP.' $false
+$openSshFirewall = $false
+if ($cloudAccess) {
+    $openSshFirewall = $sshInstalled -and (Ask-YesNo 'Allow SSH connections on TCP 22 from any remote IP? The cloud provider firewall must also allow this.' $true)
+    $openApprovalFirewall = Ask-YesNo 'Allow phone approvals and enrollment on TCP 47810 from any remote IP? The cloud provider firewall must also allow this.' $true
+    $enableWeb = Ask-YesNo 'Install and enable the HTTPS admin web page on TCP 47820?' $true
+    $openWebFirewall = $false
+    if ($enableWeb) {
+        $openWebFirewall = Ask-YesNo 'Allow the admin web page on TCP 47820 from any remote IP? Keep this off unless remote web access is needed.' $false
+    }
+} else {
+    $openApprovalFirewall = Ask-YesNo 'Allow phone approvals and enrollment to reach this PC on TCP 47810 from the local subnet?' $true
+    $enableWeb = Ask-YesNo 'Install and enable the HTTPS admin web page on TCP 47820?' $true
+    $openWebFirewall = $false
+    if ($enableWeb) {
+        $openWebFirewall = Ask-YesNo 'Allow the local subnet to reach the web page on TCP 47820?' $true
+    }
+}
+$vpnClientSubnets = ''
+if (-not $cloudAccess -and ($openApprovalFirewall -or $openWebFirewall)) {
+    $defaultVpnSubnets = '10.8.0.0/24,10.8.1.0/24'
+    $cidrPattern = '^(?:(?:25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])/(?:[0-9]|[12][0-9]|3[0-2])$'
+    while ($true) {
+        $choice = Read-Host "Allow phone approvals and the web GUI from VPN ranges $defaultVpnSubnets? [Y/n/custom]"
+        if ([string]::IsNullOrWhiteSpace($choice) -or $choice -match '^(y|yes)$') {
+            $vpnClientSubnets = $defaultVpnSubnets
+            break
+        }
+        if ($choice -match '^(n|no|none)$') { break }
+
+        if ($choice -match '^(c|custom)$') {
+            $choice = Read-Host 'Enter comma-separated IPv4 VPN subnets in CIDR form (or none to skip)'
+        }
+        if ($choice -ieq 'none') { break }
+
+        $subnets = @($choice -split '\s*,\s*')
+        if (@($subnets | Where-Object { $_ -notmatch $cidrPattern }).Count -gt 0) {
+            Write-Host 'Choose Y, N, or enter CIDR ranges such as 10.8.0.0/24,10.8.1.0/24.'
+            continue
+        }
+        $vpnClientSubnets = $subnets -join ','
+        break
+    }
 }
 
 $install = Join-Path $repo 'install\install.ps1'
 $arguments = @{ Python = $python }
 if ($openApprovalFirewall) { $arguments.OpenFirewall = $true }
 if ($openWebFirewall) { $arguments.OpenWebFirewall = $true }
+if ($cloudAccess) { $arguments.CloudAccess = $true }
+if ($openSshFirewall) { $arguments.OpenSshFirewall = $true }
+if ($vpnClientSubnets) { $arguments.VpnClientSubnets = $vpnClientSubnets }
 & $install @arguments
 
 $cli = Join-Path $env:ProgramData 'ThessleyPamWin\thessley-pam-win.cmd'
@@ -99,33 +140,59 @@ function Ensure-PhoneApprover([string]$Account) {
 if ($enableWeb) {
     & $cli web on
     if ($LASTEXITCODE -ne 0) { throw 'The web page could not be enabled.' }
-    & $cli web status
+
+    $bootstrapUser = $env:USERNAME
+    $listed = @(& $cli list --user $bootstrapUser 2>&1)
+    if ($LASTEXITCODE -ne 0) {
+        foreach ($line in $listed) { Write-Host $line }
+        throw "Could not check first-phone setup for $bootstrapUser. The web page is installed; no login policy was changed."
+    }
+    $anyDevices = @($listed | Where-Object { $_ -match '\benrolled\s+\d{4}-\d{2}-\d{2}' })
+    $enrolled = @($anyDevices | Where-Object { $_ -notmatch '\(disabled\)' })
+    if ($anyDevices.Count -eq 0) {
+        Write-Host "`nNo phone is enrolled for $bootstrapUser. Creating the one-time first-phone link now."
+        & $cli web bootstrap --user $bootstrapUser
+        if ($LASTEXITCODE -ne 0) { throw 'The one-time first-phone setup link could not be created.' }
+        Write-Host 'Open the complete FIRST-PHONE ENROLLMENT LINK printed above, enter its setup code, and enroll the phone. The link expires after 10 minutes.'
+        $deadline = (Get-Date).AddMinutes(10)
+        while ((Get-Date) -lt $deadline) {
+            Start-Sleep -Seconds 3
+            $listed = @(& $cli list --user $bootstrapUser 2>&1)
+            if ($LASTEXITCODE -ne 0) { throw "Could not check enrollment status for $bootstrapUser." }
+            $enrolled = @($listed | Where-Object { $_ -match '\benrolled\s+\d{4}-\d{2}-\d{2}' -and $_ -notmatch '\(disabled\)' })
+            if ($enrolled.Count -gt 0) {
+                Write-Host "First phone enrolled for $bootstrapUser. The installer can now continue."
+                break
+            }
+        }
+        if ($enrolled.Count -eq 0) {
+            Write-Warning 'No phone was enrolled before the one-time setup expired. Rerun the guided installer to generate a fresh link.'
+        }
+    }
 }
 
 Write-Host "`nBase Thessley approval service installed and started."
 $sshConfigured = $false
 if ($sshInstalled -and $sshdService) {
-    if (Ask-YesNo 'Enable the Thessley QR approval gate for one Windows OpenSSH account now?' $false) {
-        $defaultUser = $env:USERNAME
-        $targetUser = Read-Host "Windows SSH account to configure [$defaultUser]"
-        if ([string]::IsNullOrWhiteSpace($targetUser)) { $targetUser = $defaultUser }
-        if ($targetUser -notmatch '^[A-Za-z0-9._-]{1,64}$') { throw 'Use a simple account name: letters, numbers, dot, underscore, or hyphen.' }
-        Write-Host 'The first SSH factor must already work. The default is an SSH key; phone QR approval follows it.'
-        $factor = Read-Host 'First factor: key, password, or key-password [key]'
-        if ([string]::IsNullOrWhiteSpace($factor)) { $factor = 'key' }
-        if ($factor -notin @('key', 'password', 'key-password')) { throw 'Choose key, password, or key-password.' }
-        if (Ensure-PhoneApprover $targetUser) {
-            $sshSetup = Join-Path $repo 'install\enable-ssh-qr.ps1'
-            & $sshSetup -UserName $targetUser -Python $python -Factor $factor -RollbackMinutes 15
+    if ($sshdService.Status -eq 'Running') {
+        Write-Host 'Enabling QR approval by default for current local SSH accounts. Existing OpenSSH key/password settings are preserved.'
+        & $cli ssh-defaults
+        if ($LASTEXITCODE -eq 0) {
             $sshConfigured = $true
+            Write-Host 'Accounts with no enrolled phone can use their existing SSH method until enrollment; after enrollment, phone QR approval is required.'
         } else {
-            Write-Warning "Skipped SSH policy changes. Enroll first with: & `"$cli`" enroll --user $targetUser ; then rerun setup."
+            Write-Warning 'Could not apply the default QR policy. Existing SSH configuration was retained where it had not already been updated; manage accounts from Admin > Users.'
         }
+    } else {
+        Write-Warning 'OpenSSH Server is installed but not running. No SSH policy was changed.'
     }
 } elseif ($sshInstalled) {
     Write-Warning 'OpenSSH Server is listed as installed, but its sshd service is missing. Repair OpenSSH before enabling QR SSH.'
 } else {
     Write-Host 'OpenSSH Server is not installed; the Windows sign-in tile can still be installed below.'
+}
+if ($cloudAccess) {
+    Write-Host 'Cloud mode affects the Windows firewall only. In the cloud provider firewall/security group, allow TCP 22 for SSH and TCP 47810 for phone approvals from your intended sources; allow 47820 only if you selected remote web access.'
 }
 
 $providerConfigured = $false
@@ -146,12 +213,13 @@ if (Ask-YesNo 'Install or update the experimental Thessley QR Windows sign-in ti
 Write-Host "`nTo enroll an approver later, run:"
 Write-Host "& `"$cli`" enroll --user YOURNAME"
 if ($sshConfigured -or $providerConfigured) {
-    Write-Host "`nDo not confirm until every enabled method has been tested successfully. Any new login changes have automatic rollback timers."
+    Write-Host "`nDo not confirm until every enabled method has been tested successfully."
     Write-Host 'After successful SSH QR login and/or Windows QR sign-in, run elevated:'
     Write-Host "  powershell -ExecutionPolicy Bypass -File `"$(Join-Path $env:ProgramData 'ThessleyPamWin\confirm-setup.ps1')`""
-    if ($sshConfigured) { Write-Host 'SSH configuration backups are in C:\ProgramData\ThessleyPamWin\backups.' }
+    if ($sshConfigured) { Write-Host 'SSH config changes are validated and backed up in C:\ProgramData\ThessleyPamWin\backups; QR can be turned off per account in Admin.' }
+    if ($providerConfigured) { Write-Host 'The Windows QR sign-in tile has its own automatic rollback timer.' }
     Write-Host 'The built-in Windows PIN/password tiles remain available as recovery.'
 } else {
-    Write-Host 'No SSH policy or Windows sign-in provider changes were made. Rerun this guided installer when ready.'
+    Write-Host 'No SSH policy or Windows sign-in provider changes were made. Configure per-user SSH access from the Admin page after setup.'
 }
 Write-Host 'To uninstall the approval service, remove any active SSH Match User block first, then run install\uninstall.ps1 as Administrator.'

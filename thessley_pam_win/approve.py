@@ -7,7 +7,6 @@ unreachable phone, no approver enrolled, any error) returns False: refused by de
 """
 
 import contextlib
-import errno
 import hmac
 import os
 import re
@@ -21,7 +20,6 @@ from . import grants, machine, protocol, qr, store
 from .listener import Listener
 
 PORT = 47810
-PORT_TRIES = 10  # logins at the same time each need a listener; the next free port from PORT is used
 WAIT = 90        # seconds to approve (unlock the phone, find the app): the same as thessley-pam-linux
 REQUEST_TYPE = "sudo"  # what the apps call an approval for a command-line login (thessley-pam uses the same for ssh)
 _shared_listener = None
@@ -61,29 +59,20 @@ def _link_fields(tty: str, rhost: str) -> dict:
         return _display_fields(WEB_SERVICE, rhost)
     if tty == "web-change":
         return _display_fields(WEB_CHANGE_SERVICE, rhost)
+    if tty == "windows-logon":
+        return _display_fields("windows-logon", grants.LOCAL)
     return {}
 
 
 @contextlib.contextmanager
 def _listening(ip: str, routes: dict, port: int = PORT):
-    """Register daemon approvals on its shared listener; keep ephemeral ports for standalone callers."""
+    """Register daemon approvals on its shared listener. Standalone calls use only the configured port."""
     if _shared_listener is not None and port == PORT:
         with _shared_listener.register(routes) as shared:
             yield shared
         return
-    lst = None
-    for p in range(port, port + PORT_TRIES):
-        candidate = Listener(ip, p, routes)
-        try:
-            candidate.__enter__()
-        except OSError as e:
-            if e.errno != errno.EADDRINUSE and getattr(e, "winerror", 0) not in (10048, 10013):  # in use / exclusive-use clash
-                raise
-            continue
-        lst = candidate
-        break
-    if lst is None:
-        raise OSError(errno.EADDRINUSE, os.strerror(errno.EADDRINUSE))
+    lst = Listener(ip, port, routes)
+    lst.__enter__()
     try:
         yield lst
     finally:
@@ -92,7 +81,7 @@ def _listening(ip: str, routes: dict, port: int = PORT):
 
 def run(username: str, rhost: str, tty: str, say: Callable[[str], None], log: Callable[[str, bool], None] | None = None,
         *, ip: str | None = None, port: int = PORT, wait: float | None = None, cancel: threading.Event | None = None,
-        use_pass: bool = True, grant_pass: bool = True) -> bool:
+        use_pass: bool = True, grant_pass: bool = True, request_type: str = REQUEST_TYPE) -> bool:
     """Ask for an approval for `username` logging in from `rhost`. `say(line)` shows a line to the person.
 
     `use_pass=False` ignores an existing pass and `grant_pass=False` records none: used when the approval is for adding
@@ -156,7 +145,7 @@ def run(username: str, rhost: str, tty: str, say: Callable[[str], None], log: Ca
                 log(f"unsigned answer refused from {client_ip} for {username} ({cred}, {action})", True)
                 return 400, {"result": "error", "message": "Only a refusal can be sent without a signature."}
         else:
-            msg = protocol.canonical(REQUEST_TYPE, request_id, mid, username, nonce, timestamp, action)
+            msg = protocol.canonical(request_type, request_id, mid, username, nonce, timestamp, action)
             if not protocol.verify(device["public_key"], signature, msg):
                 log(f"bad signature from {client_ip} for {username} ({cred})", True)
                 return 400, {"result": "error", "message": "Signature did not verify."}
@@ -166,16 +155,17 @@ def run(username: str, rhost: str, tty: str, say: Callable[[str], None], log: Ca
         done.set()
         return 200, {"result": "ok"}
 
-    path = f"/thessley-pam/v1/{REQUEST_TYPE}/{request_id}/respond"
+    path = f"/thessley-pam/v1/{request_type}/{request_id}/respond"
     try:
         with _listening(ip, {path: respond}, port) as lst:
-            link = f"thessleypam://{REQUEST_TYPE}?" + urlencode({
+            link = f"thessleypam://{request_type}?" + urlencode({
                 "h": ip, "p": lst.port, "fp": lst.fingerprint, "id": request_id, "n": nonce,
                 "m": mid, "hn": host, "u": username, "tty": tty,
                 **_link_fields(tty, rhost),
             })
             what = {"add-device": "adding a device for", "web": "the admin page sign-in for",
-                    "web-change": "a change to the keys of"}.get(tty, "the ssh login for")
+                    "web-change": "a change to the keys of", "windows-logon": "the Windows unlock for"}.get(
+                        tty, "the ssh login for")
             say(f"Approve {what} {username} on {host} with Thessley Passkey (within {int(wait)} s):")
             say(f"Link: {link}")  # above the QR code, so it stays in view when the code scrolls the screen
             for line in qr.lines(link, border=2):

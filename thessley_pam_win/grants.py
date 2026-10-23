@@ -18,9 +18,14 @@ window short and end passes (end-pass) when in doubt.
 """
 
 import json
+import hashlib
+import hmac
 import os
+import re
+import secrets
 import shutil
 import tempfile
+import threading
 import time
 
 from . import store
@@ -31,6 +36,39 @@ LOCAL = "-"
 
 def _config_path() -> str:
     return os.path.join(store.BASE, "config.json")
+
+
+def _web_admins_path() -> str:
+    return os.path.join(store.BASE, "web-admins.json")
+
+
+def web_admins() -> set[str]:
+    """Explicit administrators recorded by the elevated installer, in addition to Windows group members."""
+    try:
+        with open(_web_admins_path(), encoding="utf-8") as f:
+            raw = json.load(f)
+        users = raw.get("users", []) if isinstance(raw, dict) else []
+        return {store.normalize_user(user) for user in users if isinstance(user, str)}
+    except (OSError, ValueError, TypeError):
+        return set()
+
+
+def add_web_admin(username: str) -> None:
+    """Add one installer-authorized account without altering service or web settings."""
+    username = store.normalize_user(username)
+    path = _web_admins_path()
+    try:
+        with open(path, encoding="utf-8") as f:
+            raw = json.load(f)
+        users = raw.get("users", []) if isinstance(raw, dict) else []
+    except FileNotFoundError:
+        users = []
+    if not isinstance(users, list):
+        raise ValueError("Could not safely read the web administrator list.")
+    normalized = {store.normalize_user(user) for user in users if isinstance(user, str)}
+    normalized.add(username)
+    store.ensure_dirs()
+    _atomic_write(path, {"version": 1, "users": sorted(normalized)}, store.BASE)
 
 
 def _grants_dir() -> str:
@@ -96,6 +134,117 @@ def set_self_enroll_first(on: bool) -> None:
 WEB_DEFAULTS = {"enabled": False, "listen": "", "port": 47820, "session_minutes": 15, "cert": "", "key": "",
                 "max_connections": 32, "rate_limit_entries": 4096, "log_max_bytes": 1000000, "log_rotations": 5,
                 "localhost_only": False}
+
+
+def ssh_fallback_unenrolled() -> bool:
+    """Allow normal SSH only for accounts that have never enrolled a phone; default on for setup recovery."""
+    return _load_config().get("ssh_fallback_unenrolled", True) is not False
+
+
+def set_ssh_fallback_unenrolled(enabled: bool) -> None:
+    store.ensure_dirs()
+    data = _load_config()
+    data["ssh_fallback_unenrolled"] = bool(enabled)
+    _atomic_write(_config_path(), data, store.BASE)
+
+WEB_BOOTSTRAP_SECONDS = 10 * 60
+_web_bootstrap_lock = threading.Lock()
+
+
+def _web_bootstrap_path() -> str:
+    return os.path.join(store.BASE, "web-bootstrap.json")
+
+
+def create_web_bootstrap(username: str) -> tuple[str, str, int]:
+    """Create a short-lived, one-use credential that can only start first-device enrollment."""
+    username = store.normalize_user(username)
+    with _web_bootstrap_lock:
+        if store.devices(username):
+            raise ValueError("This account already has a device; web bootstrap is only for first enrollment.")
+        store.ensure_dirs()
+        token = secrets.token_hex(32)
+        code = f"{secrets.randbelow(100_000_000):08d}"
+        expires = int(time.time() + WEB_BOOTSTRAP_SECONDS)
+        record = {
+            "user": username,
+            "token_hash": hashlib.sha256(token.encode("ascii")).hexdigest(),
+            "code_hash": hashlib.sha256(f"{token}:{code}".encode("ascii")).hexdigest(),
+            "expires_at": expires,
+        }
+        # Do not replace a live grant unexpectedly; issue another after expiry or consumption.
+        path = _web_bootstrap_path()
+        try:
+            with open(path, encoding="utf-8") as f:
+                current = json.load(f)
+            active_until = current.get("expires_at", 0) if isinstance(current, dict) else 0
+            if not isinstance(active_until, (int, float)):
+                raise ValueError("Could not safely check an existing first-phone setup link.")
+            if active_until > time.time():
+                raise ValueError("A first-phone setup link is already active. Wait for it to expire before creating another.")
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError) as exc:
+            if isinstance(exc, ValueError) and ("already active" in str(exc) or "safely check" in str(exc)):
+                raise
+            raise ValueError("Could not safely check an existing first-phone setup link.") from exc
+        _atomic_write(path, record, store.BASE)
+        return token, code, expires
+
+
+def consume_web_bootstrap(token: str, code: str, now: float | None = None) -> str | None:
+    """Atomically consume the one-time bootstrap credential; return its account only if still unused and empty."""
+    if not re.fullmatch(r"[0-9a-f]{64}", token or "") or not re.fullmatch(r"\d{8}", code or ""):
+        return None
+    path = _web_bootstrap_path()
+    with _web_bootstrap_lock:
+        return _consume_web_bootstrap_locked(path, token, code, now)
+
+
+def _consume_web_bootstrap_locked(path: str, token: str, code: str, now: float | None = None) -> str | None:
+    try:
+        with open(path, encoding="utf-8") as f:
+            record = json.load(f)
+    except (OSError, ValueError):
+        return None
+
+    def matches(candidate: dict) -> bool:
+        try:
+            username = store.normalize_user(candidate.get("user", ""))
+            token_hash = hashlib.sha256(token.encode("ascii")).hexdigest()
+            code_hash = hashlib.sha256(f"{token}:{code}".encode("ascii")).hexdigest()
+            return (candidate.get("expires_at", 0) > (time.time() if now is None else now)
+                    and hmac.compare_digest(str(candidate.get("token_hash", "")), token_hash)
+                    and hmac.compare_digest(str(candidate.get("code_hash", "")), code_hash)
+                    and not store.devices(username))
+        except (TypeError, ValueError, OSError):
+            return False
+
+    if not isinstance(record, dict) or not matches(record):
+        return None
+    claimed = path + ".used." + secrets.token_hex(8)
+    try:
+        # Rename is atomic on the same volume. Only one concurrent request can claim this file.
+        os.rename(path, claimed)
+    except OSError:
+        return None
+    try:
+        with open(claimed, encoding="utf-8") as f:
+            claimed_record = json.load(f)
+        if not isinstance(claimed_record, dict) or not matches(claimed_record):
+            return None
+        username = store.normalize_user(claimed_record["user"])
+        # Recheck after claiming. Another enrollment path may have won the race between
+        # the initial check and the atomic rename.
+        if store.devices(username):
+            return None
+        return username
+    except (OSError, ValueError, KeyError):
+        return None
+    finally:
+        try:
+            os.unlink(claimed)
+        except OSError:
+            pass
 
 
 def web_settings() -> dict:

@@ -28,7 +28,7 @@ import socketserver
 import threading
 import time
 
-from . import approve, enroll, grants, machine, peer, store, web
+from . import approve, enroll, grants, machine, peer, qr, store, web
 from .listener import SharedListener
 
 HOST, PORT = "127.0.0.1", 47800
@@ -93,11 +93,12 @@ class Handler(socketserver.StreamRequestHandler):
     def handle(self):
         try:
             req = json.loads(self.rfile.readline(MAX_REQUEST + 1))
-            assert isinstance(req, dict) and req.get("op") in ("approve", "enroll")
+            assert isinstance(req, dict) and req.get("op") in (
+                "approve", "enroll", "admin-enroll", "web-approve", "web-enroll", "windows-logon", "windows-logon-test")
             user = req["user"]
             assert isinstance(user, str)
             rhost = req.get("rhost") or grants.LOCAL
-            assert req["op"] == "enroll" or valid_rhost(rhost)
+            assert req["op"] in ("enroll", "windows-logon") or valid_rhost(rhost)
         except Exception:
             self._send({"done": True, "ok": False, "error": "bad request"})
             return
@@ -110,6 +111,16 @@ class Handler(socketserver.StreamRequestHandler):
         try:
             if req["op"] == "approve":
                 ok = self._approve(user, rhost, cancel)
+            elif req["op"] == "web-approve":
+                ok = self._web_approve(user, rhost, req.get("service", "web"), cancel)
+            elif req["op"] == "web-enroll":
+                ok = self._web_enroll(user, cancel)
+            elif req["op"] == "admin-enroll":
+                ok = self._admin_enroll(user, cancel)
+            elif req["op"] == "windows-logon":
+                ok = self._windows_logon(user, cancel)
+            elif req["op"] == "windows-logon-test":
+                ok = self._windows_logon_test(user, cancel)
             else:
                 ok = self._enroll(user, cancel)
         except Exception as e:  # strict: any unexpected failure refuses
@@ -129,6 +140,15 @@ class Handler(socketserver.StreamRequestHandler):
     def _approve(self, user: str, rhost: str, cancel: threading.Event) -> bool:
         self.connection.settimeout(None)
 
+        try:
+            normalized = store.normalize_user(user)
+            if not store.devices(normalized) and grants.ssh_fallback_unenrolled():
+                self._send({"say": "No phone is enrolled for this account; continuing with its configured OpenSSH authentication."})
+                log(f"{normalized} used the configured OpenSSH factor because no phone is enrolled", False)
+                return True
+        except (OSError, ValueError):
+            pass
+
         def watch():  # the client hangs up (ssh session dropped): stop waiting
             try:
                 while self.connection.recv(1):
@@ -139,6 +159,163 @@ class Handler(socketserver.StreamRequestHandler):
 
         threading.Thread(target=watch, daemon=True).start()
         return approve.run(user, rhost, "ssh", self._say(cancel), log, cancel=cancel)
+
+    def _web_approve(self, user: str, rhost: str, service: str, cancel: threading.Event) -> bool:
+        """Serve web approvals from the daemon so all phones use its one shared HTTPS listener."""
+        if not peer.client_is_system(self.client_address, self.server.server_address[1]):
+            log(f"web approval refused for {user!r}: caller is not SYSTEM", True)
+            return False
+        if service not in ("web", "web-change", "add-device") or not valid_rhost(rhost):
+            return False
+        self.connection.settimeout(None)
+
+        def watch():
+            try:
+                while self.connection.recv(1):
+                    pass
+            except OSError:
+                pass
+            cancel.set()
+
+        threading.Thread(target=watch, daemon=True).start()
+        return approve.run(user, rhost, service, self._say(cancel), log, cancel=cancel,
+                           use_pass=False, grant_pass=False, wait=web.WEB_WAIT)
+
+    def _web_enroll(self, user: str, cancel: threading.Event) -> bool:
+        """Run admin-web enrollment inside the listener-owning service, on the shared single port."""
+        if not peer.client_is_system(self.client_address, self.server.server_address[1]):
+            log(f"web enrollment refused for {user!r}: caller is not SYSTEM", True)
+            return False
+        return self._run_enrollment(user, cancel)
+
+    def _admin_enroll(self, user: str, cancel: threading.Event) -> bool:
+        """Route the administrator CLI through the same shared listener rather than opening a second port."""
+        caller = peer.client_user(self.client_address, self.server.server_address[1])
+        if (caller is None or not web.is_admin(caller)
+                or not peer.client_is_elevated(self.client_address, self.server.server_address[1])):
+            log(f"administrator enrollment refused for {user!r}: caller was {caller!r}", True)
+            self._send({"say": "Thessley Passkey: administrator rights are required to add a device for another account."})
+            return False
+        return self._run_enrollment(user, cancel)
+
+    def _run_enrollment(self, user: str, cancel: threading.Event) -> bool:
+        """Run enrollment in the listener-owning daemon; parallel enrollments share its port."""
+        try:
+            user = store.normalize_user(user)
+        except ValueError:
+            self._send({"say": "Thessley Passkey: this account name is not supported. Refusing."})
+            return False
+
+        stop_watching = self._watch(cancel)
+        with self.server.enrolling_lock:
+            if user in self.server.enrolling:
+                self._send({"say": "Thessley Passkey: an enrolment for this account is already running. Refusing."})
+                return False
+            self.server.enrolling.add(user)
+        try:
+            # The SYSTEM web process has already enforced the signed-in session, admin scope, and (for
+            # existing accounts) the required step-up approval. Do not ask for that same approval twice.
+            self.connection.settimeout(None)
+
+            def enroll_say(line: str) -> None:
+                self._say(cancel)(line)
+
+            device = enroll.run(user, enroll_say, self._ask_yes(cancel, stop_watching), cancel=cancel,
+                                wait=web.WEB_ENROLL_WAIT, confirm_wait=web.WEB_CONFIRM_WAIT, show_link=True)
+            log(f"web page: {'enrolled ' + repr(device['label']) + ' ' + device['credential_id'] if device else 'enrolment not completed'} "
+                f"for {user}", device is None)
+            return device is not None
+        finally:
+            stop_watching.set()
+            with self.server.enrolling_lock:
+                self.server.enrolling.discard(user)
+
+    def _windows_logon(self, user: str, cancel: threading.Event) -> bool:
+        """A one-time phone approval for the Windows unlock tile, called by LogonUI as SYSTEM.
+
+        Do not accept this operation from ordinary local processes, and never consume or create an SSH grace pass.
+        The Windows authentication package still validates the user's password after the phone approves.
+        """
+        caller = peer.client_user(self.client_address, self.server.server_address[1])
+        if not peer.client_is_system(self.client_address, self.server.server_address[1]):
+            self._send({"say": "Thessley Passkey: Windows unlock approval is only available to the lock screen."})
+            log(f"Windows unlock approval refused for {user!r}: caller was {caller!r}", True)
+            return False
+
+        self.connection.settimeout(None)
+
+        def watch():
+            try:
+                while self.connection.recv(1):
+                    pass
+            except OSError:
+                pass
+            cancel.set()
+
+        threading.Thread(target=watch, daemon=True).start()
+
+        def say(line: str) -> None:
+            if line.startswith("Link: "):
+                link = line[6:]
+                if not self._send({"say": "Scan this QR code with Thessley Passkey to unlock."}):
+                    cancel.set()
+                    return
+                rows = qr.bitmap_rows(link, border=2)
+                if not rows or not self._send({"qr_matrix": "/".join(rows)}):
+                    cancel.set()
+                return
+            if any(char in line for char in "▄▀█"):
+                return  # native UI receives the same QR as a matrix above
+            if not self._send({"say": line}):
+                cancel.set()
+
+        return approve.run(
+            user, grants.LOCAL, "windows-logon", say, log, cancel=cancel,
+            use_pass=False, grant_pass=False, request_type="login",
+        )
+
+    def _windows_logon_test(self, user: str, cancel: threading.Event) -> bool:
+        """Desktop-only prototype request. Restrict it to the connecting user's own account."""
+        caller = peer.client_user(self.client_address, self.server.server_address[1])
+        try:
+            same_user = caller is not None and store.normalize_user(caller) == store.normalize_user(user)
+        except ValueError:
+            same_user = False
+        if not same_user:
+            self._send({"say": "Thessley test: request refused because the app must run as the account being tested."})
+            log(f"Windows sign-in test refused for {user!r}: caller was {caller!r}", True)
+            return False
+
+        self.connection.settimeout(None)
+
+        def watch():
+            try:
+                while self.connection.recv(1):
+                    pass
+            except OSError:
+                pass
+            cancel.set()
+
+        threading.Thread(target=watch, daemon=True).start()
+
+        def say(line: str) -> None:
+            if line.startswith("Link: "):
+                if not self._send({"say": "Scan this QR code with Thessley Passkey."}):
+                    cancel.set()
+                    return
+                rows = qr.bitmap_rows(line[6:], border=2)
+                if not rows or not self._send({"qr_matrix": "/".join(rows)}):
+                    cancel.set()
+                return
+            if any(char in line for char in "▄▀█"):
+                return
+            if not self._send({"say": line}):
+                cancel.set()
+
+        return approve.run(
+            user, grants.LOCAL, "windows-logon", say, log, cancel=cancel,
+            use_pass=False, grant_pass=False, request_type="login",
+        )
 
     # -- a user adding an approver for their own account ---------------------------------------------------------------
 
@@ -202,7 +379,14 @@ class Handler(socketserver.StreamRequestHandler):
             if not self._allowed_to_enroll(user, say, cancel):
                 return False
             self.connection.settimeout(None)
-            device = enroll.run(user, say, self._ask_yes(cancel, stop_watching), cancel=cancel)
+            def enroll_say(line: str) -> None:
+                if line.startswith("Link: "):
+                    rows = qr.bitmap_rows(line[6:], border=2)
+                    if rows:
+                        self._send({"qr_matrix": "/".join(rows)})
+                say(line)
+
+            device = enroll.run(user, enroll_say, self._ask_yes(cancel, stop_watching), cancel=cancel, show_link=True)
             log(f"{'enrolled ' + repr(device['label']) + ' ' + device['credential_id'] if device else 'enrolment not completed'} "
                 f"for {user} (by themselves)", device is None)
             return device is not None
@@ -245,12 +429,26 @@ class Server(socketserver.ThreadingTCPServer):
 def main() -> int:
     store.ensure_dirs()
     grants.clear_all()  # a restart ends every pass
-    ip = machine.lan_ip()
     cert_dir = os.path.join(store.BASE, "approvals")
     cert_path, key_path = os.path.join(cert_dir, "cert.pem"), os.path.join(cert_dir, "key.pem")
-    fingerprint = web.ensure_cert(cert_path, key_path, [ip])
-    shared = SharedListener(ip, cert_path, key_path, fingerprint)
-    shared.start()
+    shared = None
+    last_network_log = 0.0
+    while shared is None:
+        try:
+            ip = machine.lan_ip()
+            parsed_ip = ipaddress.ip_address(ip)
+            if parsed_ip.is_loopback or parsed_ip.is_link_local or parsed_ip.is_unspecified:
+                raise OSError("no usable LAN address yet")
+            fingerprint = web.ensure_cert(cert_path, key_path, [ip])
+            candidate = SharedListener(ip, cert_path, key_path, fingerprint)
+            candidate.start()
+            shared = candidate
+        except (OSError, ValueError) as e:
+            now = time.monotonic()
+            if now - last_network_log >= 30:
+                log(f"waiting for a usable network address before starting the approval listener: {e}", True)
+                last_network_log = now
+            time.sleep(1)
     approve.set_shared_listener(shared)
     server = Server()
     log(f"service started on {HOST}:{server.server_address[1]} and HTTPS approval listener {ip}:47810")

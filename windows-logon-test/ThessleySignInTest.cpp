@@ -24,6 +24,8 @@ constexpr int ID_CANCEL = 1002;
 constexpr int ID_ENROLL = 1003;
 constexpr int ID_YES = 1004;
 constexpr int ID_NO = 1005;
+constexpr UINT_PTR ID_SAVE_WINDOW_SIZE = 5001;
+constexpr wchar_t VIEWER_SETTINGS_KEY[] = L"SOFTWARE\\ThessleyPamWin\\QrViewer";
 HWND g_window, g_status, g_qr, g_code, g_start, g_enroll, g_cancel, g_prompt, g_yes, g_no, g_logo;
 std::atomic<SOCKET> g_socket{INVALID_SOCKET};
 std::atomic<bool> g_busy{false};
@@ -37,6 +39,39 @@ std::mutex g_answer_mutex;
 std::condition_variable g_answer_ready;
 bool g_answer_received = false;
 std::string g_answer;
+
+void load_viewer_size(int &width, int &height) {
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, VIEWER_SETTINGS_KEY, 0, KEY_QUERY_VALUE, &key) != ERROR_SUCCESS)
+        return;
+    DWORD savedWidth = 0, savedHeight = 0, type = 0, bytes = sizeof(DWORD);
+    const bool gotWidth = RegQueryValueExW(key, L"Width", nullptr, &type,
+        reinterpret_cast<BYTE*>(&savedWidth), &bytes) == ERROR_SUCCESS && type == REG_DWORD;
+    bytes = sizeof(DWORD);
+    const bool gotHeight = RegQueryValueExW(key, L"Height", nullptr, &type,
+        reinterpret_cast<BYTE*>(&savedHeight), &bytes) == ERROR_SUCCESS && type == REG_DWORD;
+    RegCloseKey(key);
+    if (gotWidth && gotHeight && savedWidth >= 280 && savedWidth <= 8192 &&
+        savedHeight >= 340 && savedHeight <= 8192) {
+        width = static_cast<int>(savedWidth);
+        height = static_cast<int>(savedHeight);
+    }
+}
+
+void save_viewer_size(HWND hwnd) {
+    RECT bounds{};
+    if (!GetWindowRect(hwnd, &bounds)) return;
+    const DWORD width = static_cast<DWORD>(bounds.right - bounds.left);
+    const DWORD height = static_cast<DWORD>(bounds.bottom - bounds.top);
+    if (width < 280 || height < 340) return;
+    HKEY key = nullptr;
+    DWORD disposition = 0;
+    if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, VIEWER_SETTINGS_KEY, 0, nullptr, 0,
+            KEY_SET_VALUE, nullptr, &key, &disposition) != ERROR_SUCCESS) return;
+    RegSetValueExW(key, L"Width", 0, REG_DWORD, reinterpret_cast<const BYTE*>(&width), sizeof(width));
+    RegSetValueExW(key, L"Height", 0, REG_DWORD, reinterpret_cast<const BYTE*>(&height), sizeof(height));
+    RegCloseKey(key);
+}
 
 void layout_viewer(HWND hwnd) {
     if (!g_viewer_only || !g_logo || !g_status || !g_qr) return;
@@ -300,6 +335,14 @@ LRESULT CALLBACK main_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_SIZE:
         if (g_viewer_only) {
             layout_viewer(hwnd);
+            if (wp == SIZE_RESTORED) SetTimer(hwnd, ID_SAVE_WINDOW_SIZE, 500, nullptr);
+            return 0;
+        }
+        break;
+    case WM_TIMER:
+        if (g_viewer_only && wp == ID_SAVE_WINDOW_SIZE) {
+            KillTimer(hwnd, ID_SAVE_WINDOW_SIZE);
+            save_viewer_size(hwnd);
             return 0;
         }
         break;
@@ -380,6 +423,10 @@ LRESULT CALLBACK main_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_CLOSE: if(g_busy.load()){g_close_when_done=true;cancel_request();}else DestroyWindow(hwnd); return 0;
     case WM_DESTROY:
+        if (g_viewer_only) {
+            KillTimer(hwnd, ID_SAVE_WINDOW_SIZE);
+            save_viewer_size(hwnd);
+        }
         { SOCKET s=g_socket.load(); if(s!=INVALID_SOCKET) shutdown(s,SD_BOTH); }
         if (g_font) DeleteObject(g_font);
         if (g_code_font) DeleteObject(g_code_font);
@@ -412,13 +459,16 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command, int show) {
     WNDCLASSW qr{}; qr.lpfnWndProc=qr_proc; qr.hInstance=instance; qr.lpszClassName=L"ThessleyQrSurface"; qr.hCursor=LoadCursor(nullptr,IDC_ARROW); qr.hbrBackground=(HBRUSH)(COLOR_WINDOW+1); RegisterClassW(&qr);
     WNDCLASSW wc{}; wc.lpfnWndProc=main_proc; wc.hInstance=instance; wc.hIcon=appIcon; wc.lpszClassName=L"ThessleySignInTest"; wc.hCursor=LoadCursor(nullptr,IDC_ARROW); wc.hbrBackground=(HBRUSH)(COLOR_WINDOW+1); RegisterClassW(&wc);
     const wchar_t *title = g_viewer_only ? L"Thessley Passkey QR" : L"Thessley Windows sign-in test";
-    const int width = g_viewer_only ? 500 : 560, height = g_viewer_only ? 600 : 740;
+    int width = g_viewer_only ? 500 : 560, height = g_viewer_only ? 600 : 740;
     int x = CW_USEDEFAULT, y = CW_USEDEFAULT;
     if (g_viewer_only) {
         RECT workArea{};
         if (SystemParametersInfoW(SPI_GETWORKAREA, 0, &workArea, 0)) {
             x = workArea.left;
             y = workArea.top;
+            load_viewer_size(width, height);
+            width = std::clamp(width, 280, std::max(280, static_cast<int>(workArea.right - workArea.left)));
+            height = std::clamp(height, 340, std::max(340, static_cast<int>(workArea.bottom - workArea.top)));
         }
     }
     DWORD style = WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX;
