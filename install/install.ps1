@@ -15,9 +15,9 @@
     4. writes gate.cmd (what sshd will run) and thessley-pam-win.cmd (the admin tool);
     5. creates a scheduled task that starts the service as SYSTEM at boot, and starts it.
 
-  It does NOT change sshd_config, accounts or groups. Firewall rules are only added when requested: -OpenFirewall and
-  -OpenWebFirewall allow the Thessley ports from LocalSubnet and the default VPN ranges 10.8.0.0/24 and 10.8.1.0/24;
-  pass -VpnClientSubnets '' to omit VPN ranges. Add -CloudAccess to scope those requested
+  It does NOT change sshd_config, accounts or groups. -OpenFirewall and -OpenWebFirewall allow the Thessley ports from
+  LocalSubnet and the default VPN ranges 10.8.0.0/24 and 10.8.1.0/24. When OpenSSH is installed, a separate VPN-only
+  rule is also added for TCP 22; pass -VpnClientSubnets '' to omit these VPN rules. Add -CloudAccess to scope those requested
   listeners to any remote IP, and -OpenSshFirewall to also allow TCP 22 from any IP. Provider security-group rules
   are managed separately.
 #>
@@ -283,6 +283,7 @@ Write-Host 'The approval service is healthy. Refreshing bundled helper downloads
 # --- 5. optional firewall rule for the phone/app to reach the approval window --------------------------------------------
 if ($OpenFirewall) {
     Remove-NetFirewallRule -DisplayName 'Thessley Passkey approvals' -ErrorAction SilentlyContinue
+    Remove-NetFirewallRule -DisplayName 'Thessley Passkey approvals VPN' -ErrorAction SilentlyContinue
     $approvalRemoteAddress = if ($CloudAccess) { 'Any' } else { 'LocalSubnet' }
     New-NetFirewallRule -DisplayName 'Thessley Passkey approvals' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 47810 `
         -Program $Python -Profile $FirewallProfile -RemoteAddress $approvalRemoteAddress | Out-Null
@@ -297,6 +298,7 @@ if ($OpenFirewall) {
 
 if ($OpenWebFirewall) {
     Remove-NetFirewallRule -DisplayName 'Thessley admin web page' -ErrorAction SilentlyContinue
+    Remove-NetFirewallRule -DisplayName 'Thessley admin web page VPN' -ErrorAction SilentlyContinue
     $webRemoteAddress = if ($CloudAccess) { 'Any' } else { 'LocalSubnet' }
     New-NetFirewallRule -DisplayName 'Thessley admin web page' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 47820 `
         -Program $Python -Profile $FirewallProfile -RemoteAddress $webRemoteAddress | Out-Null
@@ -307,6 +309,15 @@ if ($OpenWebFirewall) {
             -Program $Python -Profile $FirewallProfile -RemoteAddress $vpnAddresses | Out-Null
         Write-Host "Firewall: also allowed TCP 47820 from VPN client subnets $($vpnAddresses -join ', ')."
     }
+}
+
+# OpenSSH keeps its existing LocalSubnet rule. Add a separate, narrow VPN
+# allowance so VPN clients can reach QR-gated SSH without widening LAN access.
+Remove-NetFirewallRule -DisplayName 'Thessley OpenSSH VPN access' -ErrorAction SilentlyContinue
+if ($VpnClientSubnets -and -not $CloudAccess -and (Get-Service -Name sshd -ErrorAction SilentlyContinue)) {
+    New-NetFirewallRule -DisplayName 'Thessley OpenSSH VPN access' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 22 `
+        -Profile Any -RemoteAddress $vpnAddresses | Out-Null
+    Write-Host "Firewall: also allowed OpenSSH on TCP 22 from VPN client subnets $($vpnAddresses -join ', ')."
 }
 
 if ($OpenSshFirewall) {

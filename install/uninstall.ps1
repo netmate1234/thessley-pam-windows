@@ -28,6 +28,7 @@ Remove-NetFirewallRule -DisplayName 'Thessley phone enrollment range' -ErrorActi
 Remove-NetFirewallRule -DisplayName 'Thessley phone enrollment range VPN' -ErrorAction SilentlyContinue
 Remove-NetFirewallRule -DisplayName 'Thessley admin web page' -ErrorAction SilentlyContinue
 Remove-NetFirewallRule -DisplayName 'Thessley admin web page VPN' -ErrorAction SilentlyContinue
+Remove-NetFirewallRule -DisplayName 'Thessley OpenSSH VPN access' -ErrorAction SilentlyContinue
 Remove-NetFirewallRule -DisplayName 'Thessley OpenSSH cloud access' -ErrorAction SilentlyContinue
 if ($RemoveData) {
     Remove-Item -Recurse -Force $base

@@ -69,7 +69,7 @@ def main() -> None:
         "Read docs/SSH.md and docs/WEB.md before installing. Requires Windows 11, administrator PowerShell, and\n"
         "Python 3.10+ installed for all users under Program Files. The guided installer can optionally configure\n"
         "the HTTPS admin page, where administrators manage per-account SSH QR requirements and first factors. It can also\n"
-        "default firewall access to local networks and VPN client subnets 10.8.0.0/24 and 10.8.1.0/24. In the guided installer, Y/Enter accepts these VPN ranges, N skips them, or enter custom CIDRs.\n"
+        "default firewall access to local networks and VPN client subnets 10.8.0.0/24 and 10.8.1.0/24 for SSH, phone approvals, and the web page. In the guided installer, Y/Enter accepts these VPN ranges, N skips them, or enter custom CIDRs.\n"
         "or configure cloud mode for changing public client IPs (TCP 22/47810, optionally 47820). Cloud-provider firewall rules are separate.\n"
         "install or update the experimental\n"
         "Windows QR sign-in tile with its own rollback. Both are opt-in; retain an SSH session and PIN/password\n"

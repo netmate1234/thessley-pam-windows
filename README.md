@@ -22,7 +22,8 @@ after testing every selected login method with `C:\ProgramData\ThessleyPamWin\co
 users is required; if it is missing, the wizard offers to install Python 3.13 with winget. It detects a missing
 OpenSSH service and stops before changing SSH policy.
 For local hosts, the firewall defaults to local networks plus VPN client ranges `10.8.0.0/24` and `10.8.1.0/24`
-for phone approvals and the admin page. The guided installer lets you skip those VPN ranges or enter custom CIDRs.
+for SSH, phone approvals, and the admin page. The installer adds a separate VPN-only SSH firewall rule, preserving
+the existing local-subnet rule. The guided installer lets you skip those VPN ranges or enter custom CIDRs.
 For cloud hosts, choose Cloud access in the wizard; it can open the Windows firewall for TCP 22 and 47810 from any
 remote address, with TCP 47820 optional. Set the matching provider security-group rules separately.
 

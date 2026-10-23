@@ -155,7 +155,8 @@ installer as two separate installs.
    **Firewall note:** the installer option `-OpenFirewall` opens TCP 47810 from the local subnet on all Windows network
    profiles by default. Phone approval and enrollment share the service-owned TCP 47810 listener, including concurrent requests. Direct installs also allow VPN client subnets `10.8.0.0/24,10.8.1.0/24` by default; pass `-VpnClientSubnets ''` to omit them. The guided installer asks for additional VPN client subnets, defaulting to
    `10.8.0.0/24,10.8.1.0/24`. Answer `Y` or press Enter to allow both, `N` to skip, or enter custom comma-separated IPv4 CIDR subnets.
-   The installer applies the selected subnets to the phone approval port (47810) and, when enabled, the web page (47820). The source remains limited to those networks;
+   The installer applies the selected subnets to SSH (TCP 22), the phone approval port (47810) and, when enabled, the web page (47820). SSH retains its existing LocalSubnet rule and adds a separate VPN-only rule;
+   approval and web listeners keep their LocalSubnet rule plus a separate VPN-only rule. The source remains limited to those networks;
    pass `-FirewallProfile Private` to restrict the rules to Private networks only.
    Enrollment does not open or select a second phone port. Both the command-line and web enrollment flows register unique request paths on TCP 47810, so concurrent requests do not block the listener.
    Before enrollment, add this narrowly scoped inbound rule from an elevated PowerShell if your firewall blocks that
