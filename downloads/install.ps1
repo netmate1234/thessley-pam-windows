@@ -7,7 +7,7 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
 }
 
 $packageUrl = 'https://wp-opsec.eagleeye-intelligence.com/wp-content/uploads/thessley-windows-downloads/windows-ssh-webgui.zip'
-$expectedHash = 'f8819cc855cabdb6a77270399b2d2905dfb8cbfec10338a1d45136ed85f33ae6'
+$expectedHash = 'ffe90ee6db712fd4a2eb3db40c9274d56225a85c3cee543bd220667543363e59'
 $work = Join-Path $env:TEMP ('Thessley-Install-' + [guid]::NewGuid().ToString('N'))
 $zip = "$work.zip"
 

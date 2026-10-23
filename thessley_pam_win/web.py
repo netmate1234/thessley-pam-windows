@@ -1107,10 +1107,12 @@ def admin_page(viewer: Session, flash: str, listener_host: str = "") -> str:
     source_error = "The saved network policy is malformed. Save a valid policy to repair it." if source["modes"] == ["invalid"] else ""
     local_networks = machine.interface_networks("local")
     source_policy = (
-        "<div class='card'><strong>Allowed source networks for SSH and Thessley services</strong>"
+        "<div class='card'><strong>Allowed source networks for Thessley SSH logins</strong>"
         + (f"<p class='bad'>{esc(source_error)}</p>" if source_error else "")
-        + "<p class='dim'>Default: Local networks + VPN networks. This scopes the default OpenSSH firewall rule when installed, plus Thessley approvals TCP 47810 and admin page TCP 47820. "
-          "The browser's current network must remain selected. Other firewall allow rules can also grant access.</p>"
+        + "<p class='dim'>Check one or more source types. All IPs is exclusive. Clients outside the selected networks are refused before phone approval. "
+          "This applies to accounts using the Thessley SSH controls. The four-hour approval pass remains tied to its original client IP.</p>"
+        + "<p class='dim'>The selected sources also scope the default OpenSSH firewall rule and the Thessley approval (TCP 47810) and Admin page (TCP 47820) listeners. "
+          "The browser's current network must remain selected when saving. Other firewall allow rules can also grant access.</p>"
         + f"<form method='post' action='/admin/set' class='ssh-source-form'>{hidden}<input type='hidden' name='name' value='ssh_source_policy'>"
         + "<div class='ssh-source-options'>"
         + f"<label><input id='ssh-source-all' type='checkbox' name='all' value='on'{ ' checked' if source_modes == ['all'] else ''} "
