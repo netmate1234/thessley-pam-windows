@@ -318,9 +318,9 @@ LRESULT CALLBACK main_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g_window = hwnd;
         g_font = CreateFontW(18,0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Segoe UI");
         if (g_viewer_only) {
-            g_logo = CreateWindowW(L"STATIC", L"", WS_CHILD|WS_VISIBLE|SS_BITMAP, 14, 12, 32, 32, hwnd, nullptr, nullptr, nullptr);
-            SendMessageW(g_logo, STM_SETIMAGE, IMAGE_BITMAP,
-                         (LPARAM)LoadBitmapW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDB_BRAND_IMAGE)));
+            g_logo = CreateWindowW(L"STATIC", L"", WS_CHILD|WS_VISIBLE|SS_ICON, 14, 12, 32, 32, hwnd, nullptr, nullptr, nullptr);
+            SendMessageW(g_logo, STM_SETIMAGE, IMAGE_ICON,
+                         (LPARAM)LoadIconW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDI_THESSLEY)));
             g_status = CreateWindowW(L"STATIC", L"Scan this QR code with Thessley Passkey.", WS_CHILD|WS_VISIBLE|SS_LEFT|SS_CENTERIMAGE|SS_EDITCONTROL, 54, 10, 420, 44, hwnd, nullptr, nullptr, nullptr);
             g_qr = CreateWindowW(L"ThessleyQrSurface", L"", WS_CHILD|WS_VISIBLE, 15, 50, 450, 450, hwnd, nullptr, nullptr, nullptr);
             SendMessageW(g_status, WM_SETFONT, (WPARAM)g_font, TRUE);
@@ -328,9 +328,9 @@ LRESULT CALLBACK main_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         std::wstring intro = L"Signed-in Windows account: " + current_user() + L". This app does not sign you in.";
-        g_logo = CreateWindowW(L"STATIC", L"", WS_CHILD|WS_VISIBLE|SS_BITMAP, 18, 18, 32, 32, hwnd, nullptr, nullptr, nullptr);
-        SendMessageW(g_logo, STM_SETIMAGE, IMAGE_BITMAP,
-                     (LPARAM)LoadBitmapW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDB_BRAND_IMAGE)));
+        g_logo = CreateWindowW(L"STATIC", L"", WS_CHILD|WS_VISIBLE|SS_ICON, 18, 18, 32, 32, hwnd, nullptr, nullptr, nullptr);
+        SendMessageW(g_logo, STM_SETIMAGE, IMAGE_ICON,
+                     (LPARAM)LoadIconW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDI_THESSLEY)));
         g_status = CreateWindowW(L"STATIC", intro.c_str(), WS_CHILD|WS_VISIBLE|SS_LEFT|SS_CENTERIMAGE, 60, 12, 468, 50, hwnd, nullptr, nullptr, nullptr);
         g_qr = CreateWindowW(L"ThessleyQrSurface", L"", WS_CHILD|WS_VISIBLE, 60, 68, 420, 420, hwnd, nullptr, nullptr, nullptr);
         g_code = CreateWindowW(L"STATIC", L"", WS_CHILD|WS_VISIBLE|SS_CENTER, 18, 492, 510, 38, hwnd, nullptr, nullptr, nullptr);
