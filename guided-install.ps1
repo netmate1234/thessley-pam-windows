@@ -43,14 +43,14 @@ $repo = Split-Path -Parent $MyInvocation.MyCommand.Path
 $python = Find-MachinePython
 if (-not $python) {
     if (-not (Get-Command winget.exe -ErrorAction SilentlyContinue)) {
-        throw 'Python 3.10+ for all users is required. Install it from python.org, then rerun this wizard.'
+        throw 'Python 3.12+ for all users is required. Install it from python.org, then rerun this wizard.'
     }
     if (Ask-YesNo 'Install Python 3.13 for all users using winget? This is required for the Thessley service.' $true) {
         winget install --id Python.Python.3.13 --scope machine --accept-package-agreements --accept-source-agreements
-        if ($LASTEXITCODE -ne 0) { throw 'Python installation failed. Install Python 3.10+ for all users, then rerun this wizard.' }
+        if ($LASTEXITCODE -ne 0) { throw 'Python installation failed. Install Python 3.12+ for all users, then rerun this wizard.' }
         $python = Find-MachinePython
     }
-    if (-not $python) { throw 'A machine-wide Python 3.10+ installation is required. No service changes were made.' }
+    if (-not $python) { throw 'A machine-wide Python 3.12+ installation is required. No service changes were made.' }
 }
 Write-Host "Using machine-wide Python: $python"
 

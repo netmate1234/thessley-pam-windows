@@ -68,8 +68,8 @@ foreach ($p in @((Split-Path $Python), (Split-Path (Split-Path $Python)))) {
         }
     }
 }
-& $Python -c "import sys; assert sys.version_info >= (3, 10)"
-if ($LASTEXITCODE -ne 0) { throw 'Python 3.10 or newer is needed.' }
+& $Python -c "import sys; assert sys.version_info >= (3, 12)"
+if ($LASTEXITCODE -ne 0) { throw 'Python 3.12 or newer is needed.' }
 
 # --- 2. stage and verify a complete candidate before stopping the live tasks -----------------------------------------
 New-Item -ItemType Directory -Force $base | Out-Null

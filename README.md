@@ -18,7 +18,7 @@ until enrollment; afterward, QR approval is required. In **Admin → Users**, ad
 requirement, block SSH, and select its first factor. Changes require fresh admin phone approval, back up and validate
 `sshd_config`, and restart OpenSSH. Keep a working SSH session and Windows PIN/password recovery available while changing login settings; the sign-in
 tile has its own rollback. Confirm only
-after testing every selected login method with `C:\ProgramData\ThessleyPamWin\confirm-setup.ps1`. Python 3.10+ for all
+after testing every selected login method with `C:\ProgramData\ThessleyPamWin\confirm-setup.ps1`. Python 3.12+ for all
 users is required; if it is missing, the wizard offers to install Python 3.13 with winget. It detects a missing
 OpenSSH service and stops before changing SSH policy.
 Under **Admin → Settings**, administrators can select allowed source networks for SSH, phone approvals, and the web page.
@@ -53,5 +53,5 @@ while the wizard applies and tests the SSH gate.
 | `thessley_pam_win/listener.py` | exclusive-use HTTPS listeners for the web page and the daemon's shared, concurrent SSH approval listener |
 | `install/install.ps1`, `uninstall.ps1` | administrator scripts: service, folder permissions, optional firewall rule |
 
-Needs Python 3.10+ installed for all users. The installer fetches the pinned runtime wheels into its private app directory.
+Needs Python 3.12+ installed for all users. The installer fetches the pinned runtime wheels into its private app directory.
 Tests: `pip install -e .[test]` then `python -m pytest`.
