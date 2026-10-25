@@ -85,7 +85,7 @@ def _fetch_setup_rollback_tasks() -> list[str] | None:
         tasks = None
     else:
         tasks = None
-        if result.returncode == 0:
+        if result.returncode == 0 and isinstance(result.stdout, str):
             try:
                 names = set()
                 for row in csv.reader(result.stdout.splitlines()):
@@ -96,7 +96,7 @@ def _fetch_setup_rollback_tasks() -> list[str] | None:
                             or re.fullmatch(r"ThessleySSHConfigRollback-[A-Za-z0-9_.-]{1,64}", task_name)):
                         names.add(task_name)
                 tasks = sorted(names)
-            except csv.Error:
+            except (csv.Error, AttributeError, TypeError, UnicodeError):
                 tasks = None
     with _ROLLBACK_CACHE_LOCK:
         _ROLLBACK_CACHE = (time.monotonic(), tasks)
@@ -1262,7 +1262,12 @@ def admin_page(viewer: Session, flash: str, listener_host: str = "") -> str:
                     '<button>Save behavior</button></form></div>')
     session = grants.web_settings()["session_minutes"]
     settings = grants.web_settings()
-    rollback_tasks = setup_rollback_tasks()
+    try:
+        rollback_tasks = setup_rollback_tasks()
+    except Exception:
+        # Task Scheduler status is supplementary. A lookup failure must not
+        # abort rendering the entire Admin page.
+        rollback_tasks = None
     rollback_status = ("<p class='bad'>Could not check Task Scheduler right now; refresh this page in a moment.</p>"
                        if rollback_tasks is None else
                        ("<ul>" + "".join(f"<li>{'Windows sign-in tile recovery' if task == 'ThessleyCredentialProviderRollback' else 'SSH login setup recovery'}: <code>{esc(task)}</code></li>" for task in rollback_tasks) + "</ul>"
