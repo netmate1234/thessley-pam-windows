@@ -22,7 +22,6 @@ one). `web status` prints its fingerprint.
 from __future__ import annotations
 
 import base64
-import csv
 import datetime
 import errno
 import hashlib
@@ -76,28 +75,39 @@ _ROLLBACK_CACHE_LOCK = threading.Lock()
 
 def _fetch_setup_rollback_tasks() -> list[str] | None:
     global _ROLLBACK_CACHE
+    # Avoid parsing localized `schtasks /FO CSV` output. Query only the fixed
+    # Thessley rollback task names through the Windows Task Scheduler API and
+    # return plain task-name lines.
+    script = r"""
+$ErrorActionPreference = 'Stop'
+try {
+    $tasks = @(Get-ScheduledTask | Where-Object {
+        $_.TaskName -eq 'ThessleyCredentialProviderRollback' -or
+        $_.TaskName -match '^ThessleySSHConfigRollback-[A-Za-z0-9_.-]{1,64}$'
+    } | Select-Object -ExpandProperty TaskName)
+    [Console]::Out.WriteLine(($tasks -join [Environment]::NewLine))
+} catch {
+    [Console]::Error.WriteLine('Task Scheduler query failed.')
+    exit 1
+}
+"""
     try:
         result = subprocess.run(
-            ["schtasks.exe", "/Query", "/FO", "CSV", "/NH"],
-            capture_output=True, text=True, timeout=15, check=False,
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True, text=True, timeout=20, check=False,
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.SubprocessError):
         tasks = None
     else:
         tasks = None
         if result.returncode == 0 and isinstance(result.stdout, str):
-            try:
-                names = set()
-                for row in csv.reader(result.stdout.splitlines()):
-                    if not row:
-                        continue
-                    task_name = row[0].strip().replace("/", "\\").split("\\")[-1]
-                    if (task_name == "ThessleyCredentialProviderRollback"
-                            or re.fullmatch(r"ThessleySSHConfigRollback-[A-Za-z0-9_.-]{1,64}", task_name)):
-                        names.add(task_name)
-                tasks = sorted(names)
-            except (csv.Error, AttributeError, TypeError, UnicodeError):
-                tasks = None
+            names = set()
+            for task_name in result.stdout.splitlines():
+                task_name = task_name.strip()
+                if (task_name == "ThessleyCredentialProviderRollback"
+                        or re.fullmatch(r"ThessleySSHConfigRollback-[A-Za-z0-9_.-]{1,64}", task_name)):
+                    names.add(task_name)
+            tasks = sorted(names)
     with _ROLLBACK_CACHE_LOCK:
         _ROLLBACK_CACHE = (time.monotonic(), tasks)
     return list(tasks) if tasks is not None else None
