@@ -85,14 +85,15 @@ capability, restart Windows, then run the installation commands again from Admin
     Restart-Computer
 
 Windows normally creates the `OpenSSH-Server-In-TCP` firewall rule during feature installation. Restrict it to the
-local subnet (the default Windows rule may be broader):
+local subnet and all network profiles. This matters when Windows classifies a DHCP-connected LAN or VM adapter as
+Public; the stock rule is often limited to Private and silently blocks SSH:
 
     $rule = Get-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -ErrorAction SilentlyContinue
     if ($rule) {
-        Set-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -Enabled True -RemoteAddress LocalSubnet
+        Set-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -Enabled True -Profile Any -RemoteAddress LocalSubnet
     } else {
         New-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -DisplayName 'OpenSSH Server (sshd)' `
-            -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 -RemoteAddress LocalSubnet
+            -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 -Profile Any -RemoteAddress LocalSubnet
     }
 
 This limits access by source address even when Windows marks the active network Public. If SSH must also be reachable
@@ -215,9 +216,10 @@ installer as two separate installs.
    profiles by default. Phone approval and enrollment share the service-owned TCP 47810 listener, including concurrent requests. Direct installs also allow VPN client subnets `10.8.0.0/24,10.8.1.0/24` by default; pass `-VpnClientSubnets ''` to omit them. The guided installer asks for additional VPN client subnets, defaulting to
    `10.8.0.0/24,10.8.1.0/24`. Answer `Y` or press Enter to allow both, `N` to skip, or enter custom comma-separated IPv4 CIDRs.
    If the phone reports a source IP outside those ranges, use that exact IP with `/32` (for example `10.31.19.228/32`) or enter its VPN subnet.
-   The installer applies the selected subnets to SSH (TCP 22), the phone approval port (47810) and, when enabled, the web page (47820). SSH retains its existing LocalSubnet rule and adds a separate VPN-only rule;
+   The installer normalizes the OpenSSH TCP 22 rule to all Windows network profiles and the local subnet, then adds a separate VPN-only rule;
    approval and web listeners keep their LocalSubnet rule plus a separate VPN-only rule. The source remains limited to those networks;
-   pass `-FirewallProfile Private` to restrict the rules to Private networks only.
+   pass `-FirewallProfile Private` to restrict the Thessley listener rules to Private networks only. OpenSSH remains enabled
+   on all profiles so DHCP or a Public network classification does not unexpectedly break SSH.
    Enrollment does not open or select a second phone port. Both the command-line and web enrollment flows register unique request paths on TCP 47810, so concurrent requests do not block the listener.
    Before enrollment, add this narrowly scoped inbound rule from an elevated PowerShell if your firewall blocks that
    approval and enrollment port:
@@ -448,7 +450,7 @@ The service writes `C:\ProgramData\ThessleyPamWin\service.log` (approvals, denia
 | The desktop app says "This computer is not enrolled with ..." when you paste a link | You pasted the **first** link of an add-device enrolment ("Approve adding a device"). That one is answered by the phone or app that is **already** enrolled; the new device gets the second link, which appears after the approval |
 | Enrolling the desktop app with a TPM protection asks for administrator rights, or fails without a prompt | Fixed in thessley-passkey-linux `1a173d0`: enrolling as an approver for a computer needs no administrator rights (only a website's TPM proof does). Update the app |
 | `enroll` is denied or cannot start for a normal user | `thessley-pam-win.cmd` is not readable by Users: re-run `install.ps1` (see above) |
-| The phone cannot reach the computer | The network is "Public" in Windows (the rule is Private only), or the phone is on mobile data, or a third-party firewall blocks TCP 47810 |
+| The phone cannot reach the computer | Check that the installer-created TCP 47810 rule includes the phone's source subnet, or that the phone is on a reachable LAN/VPN; a third-party firewall may also block it |
 | "Phone clock is off by more than a minute" | Fix the time on the phone or on this computer |
 | The login ends right after the password with no QR code | The gate failed to start: check the Python and `gate_main.py` paths in `ForceCommand` |
 | QR code looks broken | The terminal is not UTF-8 or too narrow; use the `Link:` line with the desktop app |
@@ -508,5 +510,7 @@ Do those first on an account you can recover, with a second session open.
   on Automatic start). The cause was not determined.
 - **Notepad does not show `sshd_config`**: `C:\ProgramData` is hidden and the file has no extension. Use
   `notepad C:\ProgramData\ssh\sshd_config` from an administrator PowerShell.
-- Windows classes many home Wi-Fi networks as **Public**. Installer-created firewall rules apply to all profiles by
-  default, while remaining limited to the local subnet. Use `-FirewallProfile Private` if you want Private-only rules.
+- Windows classes many home Wi-Fi networks and VM adapters as **Public**. The installer enables OpenSSH on all profiles
+  while limiting the source to the local subnet, and creates Thessley listener rules using ports and client source ranges.
+  These rules do not depend on the server's DHCP address. `-FirewallProfile Private` restricts the Thessley listener rules,
+  but deliberately does not make OpenSSH Private-only.

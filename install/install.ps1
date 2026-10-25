@@ -350,6 +350,22 @@ if (-not $appExisted -and -not (Test-Path -LiteralPath $configPath -PathType Lea
 if ($PreserveFirewall) {
     Write-Host 'Firewall rules were preserved during this code update.'
 } else {
+# Windows may classify a DHCP-connected LAN or VM adapter as Public. The
+# inbox OpenSSH rule is commonly Private-only, which makes sshd listen on port
+# 22 while the firewall silently drops connections. Normalize only its profile
+# and source scope; never pin this rule to a local DHCP address.
+$sshdService = Get-Service -Name sshd -ErrorAction SilentlyContinue
+if ($sshdService) {
+    $openSshRule = Get-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -ErrorAction SilentlyContinue
+    if ($openSshRule) {
+        Set-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -Enabled True -Profile Any -RemoteAddress LocalSubnet
+    } else {
+        New-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -DisplayName 'OpenSSH Server (sshd)' -Enabled True `
+            -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 -Profile Any -RemoteAddress LocalSubnet | Out-Null
+    }
+    Write-Host 'Firewall: enabled the OpenSSH TCP 22 rule on all network profiles, limited to the local subnet.'
+}
+
 if ($OpenFirewall) {
     Remove-NetFirewallRule -DisplayName 'Thessley Passkey approvals' -ErrorAction SilentlyContinue
     Remove-NetFirewallRule -DisplayName 'Thessley Passkey approvals VPN' -ErrorAction SilentlyContinue
@@ -380,8 +396,9 @@ if ($OpenWebFirewall) {
     }
 }
 
-# OpenSSH keeps its existing LocalSubnet rule. Add a separate, narrow VPN
-# allowance so VPN clients can reach QR-gated SSH without widening LAN access.
+# Add a separate, narrow VPN allowance so VPN clients can reach QR-gated SSH
+# without widening LAN access. These rules use source ranges and ports, not the
+# server's current local IP, so DHCP address changes do not stale the rules.
 Remove-NetFirewallRule -DisplayName 'Thessley OpenSSH VPN access' -ErrorAction SilentlyContinue
 if ($VpnClientSubnets -and -not $CloudAccess -and (Get-Service -Name sshd -ErrorAction SilentlyContinue)) {
     New-NetFirewallRule -DisplayName 'Thessley OpenSSH VPN access' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 22 `
