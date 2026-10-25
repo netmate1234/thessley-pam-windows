@@ -371,12 +371,12 @@ if ($OpenFirewall) {
     Remove-NetFirewallRule -DisplayName 'Thessley Passkey approvals VPN' -ErrorAction SilentlyContinue
     $approvalRemoteAddress = if ($CloudAccess) { 'Any' } else { 'LocalSubnet' }
     New-NetFirewallRule -DisplayName 'Thessley Passkey approvals' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 47810 `
-        -Program $Python -Profile $FirewallProfile -RemoteAddress $approvalRemoteAddress | Out-Null
+        -Profile $FirewallProfile -RemoteAddress $approvalRemoteAddress | Out-Null
     Write-Host "Firewall: allowed phone approvals and enrollment on TCP 47810 from $approvalRemoteAddress ($FirewallProfile networks)."
     if ($VpnClientSubnets) {
         Remove-NetFirewallRule -DisplayName 'Thessley Passkey approvals VPN' -ErrorAction SilentlyContinue
         New-NetFirewallRule -DisplayName 'Thessley Passkey approvals VPN' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 47810 `
-            -Program $Python -Profile $FirewallProfile -RemoteAddress $vpnAddresses | Out-Null
+            -Profile $FirewallProfile -RemoteAddress $vpnAddresses | Out-Null
         Write-Host "Firewall: also allowed phone approvals and enrollment on TCP 47810 from VPN client subnets $($vpnAddresses -join ', ')."
     }
 }
@@ -386,12 +386,12 @@ if ($OpenWebFirewall) {
     Remove-NetFirewallRule -DisplayName 'Thessley admin web page VPN' -ErrorAction SilentlyContinue
     $webRemoteAddress = if ($CloudAccess) { 'Any' } else { 'LocalSubnet' }
     New-NetFirewallRule -DisplayName 'Thessley admin web page' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 47820 `
-        -Program $Python -Profile $FirewallProfile -RemoteAddress $webRemoteAddress | Out-Null
+        -Profile $FirewallProfile -RemoteAddress $webRemoteAddress | Out-Null
     Write-Host "Firewall: allowed TCP 47820 (the admin web page) from $webRemoteAddress ($FirewallProfile networks)."
     if ($VpnClientSubnets) {
         Remove-NetFirewallRule -DisplayName 'Thessley admin web page VPN' -ErrorAction SilentlyContinue
         New-NetFirewallRule -DisplayName 'Thessley admin web page VPN' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 47820 `
-            -Program $Python -Profile $FirewallProfile -RemoteAddress $vpnAddresses | Out-Null
+            -Profile $FirewallProfile -RemoteAddress $vpnAddresses | Out-Null
         Write-Host "Firewall: also allowed TCP 47820 from VPN client subnets $($vpnAddresses -join ', ')."
     }
 }

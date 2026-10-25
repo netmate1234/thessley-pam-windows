@@ -28,7 +28,8 @@ The default is local networks plus VPN client ranges `10.8.0.0/24` and `10.8.1.0
 For local hosts, the firewall defaults to local networks plus VPN client ranges `10.8.0.0/24` and `10.8.1.0/24`
 for SSH, phone approvals, and the admin page. The installer enables the OpenSSH rule on all Windows network profiles
 while restricting it to the local subnet, then adds a separate VPN-only SSH rule. Rules use ports and source ranges,
-not the server's current DHCP address, so a lease change does not require editing the firewall. The guided installer
+not the server's current DHCP address or a Python executable path, so DHCP lease changes and interpreter updates do not
+require editing the firewall. The guided installer
 lets you skip those VPN ranges or enter custom CIDRs.
 For cloud hosts, choose Cloud access in the wizard; it can open the Windows firewall for TCP 22 and 47810 from any
 remote address, with TCP 47820 optional. Set the matching provider security-group rules separately.

@@ -215,6 +215,8 @@ installer as two separate installs.
    **Firewall note:** the installer option `-OpenFirewall` opens TCP 47810 from the local subnet on all Windows network
    profiles by default. Phone approval and enrollment share the service-owned TCP 47810 listener, including concurrent requests. Direct installs also allow VPN client subnets `10.8.0.0/24,10.8.1.0/24` by default; pass `-VpnClientSubnets ''` to omit them. The guided installer asks for additional VPN client subnets, defaulting to
    `10.8.0.0/24,10.8.1.0/24`. Answer `Y` or press Enter to allow both, `N` to skip, or enter custom comma-separated IPv4 CIDRs.
+   These Thessley listener rules match the TCP ports and chosen remote source ranges, not a Python executable path. A Python
+   update or a different interpreter path therefore does not silently invalidate the inbound rule.
    If the phone reports a source IP outside those ranges, use that exact IP with `/32` (for example `10.31.19.228/32`) or enter its VPN subnet.
    The installer normalizes the OpenSSH TCP 22 rule to all Windows network profiles and the local subnet, then adds a separate VPN-only rule;
    approval and web listeners keep their LocalSubnet rule plus a separate VPN-only rule. The source remains limited to those networks;
