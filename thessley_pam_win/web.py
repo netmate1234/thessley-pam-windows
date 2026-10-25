@@ -1220,9 +1220,11 @@ def admin_page(viewer: Session, flash: str, listener_host: str = "") -> str:
                        if rollback_tasks is None else
                        ("<ul>" + "".join(f"<li><code>{esc(task)}</code></li>" for task in rollback_tasks) + "</ul>"
                         if rollback_tasks else "<p class='ok'>No Thessley setup rollback timer is pending.</p>"))
+    rollback_help = ("<p class='dim'>After you have verified Windows sign-in works, keep this setup by stopping its automatic rollback. "
+                     "This asks your phone for a fresh approval. Until then, the recovery timer stays active.</p>"
+                     if rollback_tasks else "")
     rollback = ("<div class='card'><strong>Windows sign-in rollback</strong>" + rollback_status
-                + "<p class='dim'>After you have verified Windows sign-in works, keep this setup by stopping its automatic rollback. "
-                  "This asks your phone for a fresh approval. Until then, the recovery timer stays active.</p>"
+                + rollback_help
                 + (f"<form method='post' action='/admin/set' class='row'>{hidden}<input type='hidden' name='name' value='confirm_setup'>"
                    "<input type='hidden' name='value' value='yes'><button>Keep setup and stop rollback</button></form>"
                    if rollback_tasks else "") + "</div>")
