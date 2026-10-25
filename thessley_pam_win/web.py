@@ -71,7 +71,6 @@ def now() -> float:
 
 _ROLLBACK_CACHE: tuple[float, list[str] | None] = (0.0, None)
 _ROLLBACK_CACHE_LOCK = threading.Lock()
-_ROLLBACK_REFRESHING = False
 
 
 def _fetch_setup_rollback_tasks() -> list[str] | None:
@@ -103,33 +102,16 @@ def _fetch_setup_rollback_tasks() -> list[str] | None:
     return list(tasks) if tasks is not None else None
 
 
-def _refresh_setup_rollback_background() -> None:
-    global _ROLLBACK_REFRESHING
-    try:
-        _fetch_setup_rollback_tasks()
-    except Exception:
-        pass
-    finally:
-        with _ROLLBACK_CACHE_LOCK:
-            _ROLLBACK_REFRESHING = False
-
-
 def setup_rollback_tasks(refresh: bool = False) -> list[str] | None:
     """Return only Thessley setup rollback task names, without launching PowerShell on page loads."""
-    global _ROLLBACK_CACHE, _ROLLBACK_REFRESHING
     with _ROLLBACK_CACHE_LOCK:
         cached_at, cached = _ROLLBACK_CACHE
         # Rollback tasks can be created or expire outside this service process.
-        # Keep an empty result very briefly, and never present any expired
-        # scheduler snapshot as current state while its background refresh runs.
+        # A cache miss is not a scheduler failure. Refresh an expired result
+        # before rendering it; only a failed query should produce None.
         ttl = 2 if cached == [] else (10 if cached is not None else 2)
         expired = time.monotonic() - cached_at >= ttl
-        if not refresh and cached_at > 0:
-            if expired and not _ROLLBACK_REFRESHING:
-                _ROLLBACK_REFRESHING = True
-                threading.Thread(target=_refresh_setup_rollback_background, daemon=True).start()
-            if expired:
-                return None
+        if not refresh and cached_at > 0 and not expired:
             return list(cached) if cached is not None else None
     return _fetch_setup_rollback_tasks()
 
