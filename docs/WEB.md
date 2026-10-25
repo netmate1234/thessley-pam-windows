@@ -6,6 +6,13 @@ same way. There are no passwords.
 
 ## What to do on the Windows computer
 
+The **Admin > Setup rollback** card lists pending SSH setup and Windows sign-in recovery timers separately. Guided setup
+arms and verifies a 30-minute SSH recovery timer before enabling QR access. Installing the optional Windows sign-in tile
+creates its own timer later. After testing every enabled login method, choose **Keep setup and stop rollback** and approve
+the fresh request on your phone. The page verifies that the tasks were removed. Until then, SSH recovery restores the
+pre-setup configuration at its deadline; enrollment keys remain installed. No pending timer is expected before login
+changes start or after you confirm the setup.
+
 Do these in an **administrator PowerShell**, in the repository folder, after pulling the latest version
 (`git pull`). The page is a second scheduled task next to the approval service; it stays **off** until you switch it on.
 

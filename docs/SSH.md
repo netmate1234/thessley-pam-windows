@@ -179,11 +179,14 @@ If prompted to install Python, allow the machine-wide installation and wait for 
 PowerShell is not elevated, close the SSH session and run it from Administrator PowerShell at the Windows console. Do not
 disable UAC, enable broad remote administration, or expose SSH to the public internet to work around a filtered token.
 
-The guided installer can optionally configure the QR gate for one SSH account. It backs up `sshd_config`, validates both
-the file and effective per-account settings, restarts `sshd`, and schedules automatic restore. Keep the current SSH session
-open and test a second login. The same installer can optionally stage the experimental Windows QR sign-in tile; that
-change also has a rollback timer. Keep PIN/password recovery available and run the installed `confirm-setup.ps1` only
-after each selected login method succeeds.
+Before enabling default QR gates for local SSH accounts, the guided installer snapshots `sshd_config` and verifies an
+enabled SYSTEM recovery task with a deadline 30 minutes ahead. If that task cannot be armed, setup stops before changing
+SSH policy. Until confirmed, expiry restores the original SSH configuration and its ACL, validates it, and restarts sshd.
+Keep the current SSH session open and test a second login. The optional Windows QR sign-in tile has a separate rollback
+timer, created when that tile is installed. Both appear under **Admin > Setup rollback**, with labels identifying SSH or
+Windows sign-in recovery. After every installed login method succeeds, choose **Keep setup and stop rollback** there;
+it requires fresh phone approval. The installed `confirm-setup.ps1` is the equivalent administrator-console command.
+Keep the built-in PIN/password recovery options available.
 
 If Windows has multiple active IPv4 adapters, the guided installer lists their addresses and asks which one the phone can
 reach. Choose the LAN or VPN address the phone will use; in a VM, avoid a private NAT-only address. The installer stores

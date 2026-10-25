@@ -57,6 +57,7 @@ def main() -> None:
 
     service_files = [ROOT / "requirements.lock", ROOT / "guided-install.ps1", ROOT / "install" / "install.ps1",
                      ROOT / "install" / "update.ps1",
+                     ROOT / "install" / "arm-ssh-rollback.ps1",
                      ROOT / "install" / "uninstall.ps1", ROOT / "install" / "enable-ssh-qr.ps1",
                      ROOT / "install" / "confirm-setup.ps1", ROOT / "install" / "setup-logon-provider.ps1"]
     service_files += files_under(ROOT / "thessley_pam_win", {".py", ".pem"})

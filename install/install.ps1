@@ -110,6 +110,7 @@ New-Item -ItemType Directory -Force $base | Out-Null
 icacls $base /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
 icacls $base /grant '*S-1-5-32-545:(RX)' | Out-Null
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'confirm-setup.ps1') -Destination (Join-Path $base 'confirm-setup.ps1') -Force
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'arm-ssh-rollback.ps1') -Destination (Join-Path $base 'arm-ssh-rollback.ps1') -Force
 
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $stage = Join-Path $base "app.stage-$stamp"

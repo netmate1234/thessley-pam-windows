@@ -296,13 +296,14 @@ Write-Host "`nBase Thessley approval service installed and started."
 $sshConfigured = $false
 if ($sshInstalled -and $sshdService) {
     if ($sshdService.Status -eq 'Running') {
+        $sshRecovery = & (Join-Path $repo 'install\arm-ssh-rollback.ps1') -RollbackMinutes 30
         Write-Host 'Enabling QR approval by default for current local SSH accounts. Existing OpenSSH key/password settings are preserved.'
         & $cli ssh-defaults
         if ($LASTEXITCODE -eq 0) {
             $sshConfigured = $true
             Write-Host 'Accounts with no enrolled phone can use their existing SSH method until enrollment; after enrollment, phone QR approval is required.'
         } else {
-            Write-Warning 'Could not apply the default QR policy. Existing SSH configuration was retained where it had not already been updated; manage accounts from Admin > Users.'
+            throw 'Could not apply the default QR policy. SSH setup recovery remains armed; keep this session open and check Admin > Setup rollback.'
         }
     } else {
         Write-Warning 'OpenSSH Server is installed but not running. No SSH policy was changed.'
@@ -338,7 +339,7 @@ if ($sshConfigured -or $providerConfigured) {
     Write-Host 'After successful SSH QR login and/or Windows QR sign-in, run elevated:'
     $confirmScript = Join-Path $env:ProgramData 'ThessleyPamWin\confirm-setup.ps1'
     Write-Host "  powershell -ExecutionPolicy Bypass -File `"$confirmScript`""
-    if ($sshConfigured) { Write-Host 'SSH config changes are validated and backed up in C:\ProgramData\ThessleyPamWin\backups; QR can be turned off per account in Admin.' }
+    if ($sshConfigured) { Write-Host 'SSH config changes have a verified 30-minute rollback timer. After testing a fresh SSH login, use Admin > Setup rollback > Keep setup and stop rollback.' }
     if ($providerConfigured) { Write-Host 'The Windows QR sign-in tile has its own automatic rollback timer.' }
     Write-Host 'The built-in Windows PIN/password tiles remain available as recovery.'
 } else {

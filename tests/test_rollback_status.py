@@ -68,3 +68,24 @@ def test_successful_confirmation_verifies_timer_absence():
             patch.object(web, "setup_rollback_tasks", return_value=[]) as status:
         assert web.cancel_setup_rollback_tasks() == "Timers cancelled."
         status.assert_called_once_with(refresh=True)
+
+
+@pytest.mark.parametrize('tasks,label', [
+    (["ThessleySSHConfigRollback-Setup"], "SSH login setup recovery"),
+    (["ThessleyCredentialProviderRollback"], "Windows sign-in tile recovery"),
+])
+def test_admin_distinguishes_the_login_method_being_protected(tmp_path, tasks, label):
+    with patch.object(web.store, 'BASE', str(tmp_path)), \
+            patch.object(web, 'setup_rollback_tasks', return_value=tasks), \
+            patch.object(web.ssh_policy, 'local_accounts', return_value=[]), \
+            patch.object(web.ssh_policy, 'policies', return_value={}), \
+            patch.object(web.ssh_policy, 'custom_match_users', return_value=set()), \
+            patch.object(web.ssh_policy, 'blocked_users', return_value=set()), \
+            patch.object(web.machine, 'interface_networks', return_value=[]), \
+            patch.object(web.machine, 'lan_ip', return_value='127.0.0.1'), \
+            patch.object(web.update_task, 'last_run', return_value={}):
+        body = web.admin_page(web.Session('martin', 15), '')
+        assert '<strong>Setup rollback</strong>' in body
+        assert label in body
+        assert tasks[0] in body
+        assert 'Keep setup and stop rollback' in body
