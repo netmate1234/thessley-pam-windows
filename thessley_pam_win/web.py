@@ -50,7 +50,7 @@ from cryptography.x509.oid import NameOID
 
 from . import enroll, firewall, grants, machine, ssh_policy, store, update_task
 
-TTY_LOGIN, TTY_CHANGE, TTY_DEVICE = "web", "web-change", "add-device"  # what approve.run is told (it names them for the apps)
+TTY_LOGIN, TTY_CHANGE, TTY_DEVICE, TTY_INSTALL_APPROVAL = "web", "web-change", "add-device", "install-approval"
 
 CRED_RE = re.compile(r"^c_[0-9a-f]{16}$")
 ID_RE = re.compile(r"^[0-9a-f]{32}$")
@@ -380,7 +380,8 @@ class WebApp:
             # The SYSTEM service owns the one phone listener. Routing through it lets concurrent web approvals
             # share TCP 47810 instead of selecting a fallback port.
             ok = self._service_flow(flow, "web-approve", rhost=ip,
-                                    service={TTY_CHANGE: "web-change", TTY_DEVICE: "add-device"}.get(tty, "web"))
+                                    service={TTY_CHANGE: "web-change", TTY_DEVICE: "add-device",
+                                             TTY_INSTALL_APPROVAL: "web-change"}.get(tty, "web"))
         except Exception as exc:  # strict: any trouble is a refusal
             flow.say(f"error: {exc!r}")
             ok = False
@@ -1817,7 +1818,7 @@ def make_handler(app: WebApp):
                     s.flash = "No pending Thessley setup rollback timer was found."
                     return self.redirect("/admin")
                 return self.start_change(s, "confirming this Windows setup and cancelling its rollback timer",
-                                         app.change_setting(name, value))
+                                         app.change_setting(name, value), TTY_INSTALL_APPROVAL)
             if name == "ssh_policy":
                 target, factor = (data.get("user") or "").strip(), (data.get("factor") or "native").strip()
                 try:

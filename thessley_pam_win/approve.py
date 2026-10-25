@@ -57,7 +57,7 @@ def _link_fields(tty: str, rhost: str) -> dict:
         return _display_fields(APPROVE_SERVICE, grants.LOCAL)
     if tty == "web":
         return _display_fields(WEB_SERVICE, rhost)
-    if tty == "web-change":
+    if tty in ("web-change", "install-approval"):
         return _display_fields(WEB_CHANGE_SERVICE, rhost)
     if tty == "windows-logon":
         return _display_fields("windows-logon", grants.LOCAL)
@@ -164,7 +164,8 @@ def run(username: str, rhost: str, tty: str, say: Callable[[str], None], log: Ca
                 **_link_fields(tty, rhost),
             })
             what = {"add-device": "adding a device for", "web": "the admin page sign-in for",
-                    "web-change": "a change to the keys of", "windows-logon": "the Windows unlock for"}.get(
+                    "web-change": "an Admin change for", "install-approval": "the Windows setup confirmation for",
+                    "windows-logon": "the Windows unlock for"}.get(
                         tty, "the ssh login for")
             say(f"Approve {what} {username} on {host} with Thessley Passkey (within {int(wait)} s):")
             say(f"Link: {link}")  # above the QR code, so it stays in view when the code scrolls the screen
