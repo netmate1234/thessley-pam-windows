@@ -207,7 +207,7 @@ def cmd_ssh_defaults(args) -> int:
     else:
         print("No new QR policies were needed.")
     if skipped:
-        print("Left custom Match User rules unchanged: " + ", ".join(skipped))
+        print("Not changed: " + ", ".join(skipped))
     return 0
 
 
@@ -218,6 +218,38 @@ def _task(*args: str) -> subprocess.CompletedProcess:
     # schtasks answers in the console's code page (on a French Windows with accents); only the exit code matters here, so a
     # byte that is not valid UTF-8 must not raise
     return subprocess.run(["schtasks", *args], capture_output=True, text=True, errors="replace", check=False)
+
+
+def web_page_host(st: dict) -> tuple[str, str | None]:
+    """The address the one-time first-phone link must name, and a problem to report if the page does not answer there.
+
+    The page records the address it really listens on; a guess (the default-route address) can differ from it when the computer has
+    several adapters (Wi-Fi plus a VPN adapter), which gives a link to an address nothing listens on."""
+    port = int(st["port"])
+    recorded = ""
+    try:
+        with open(os.path.join(store.BASE, "web", "listening.txt"), encoding="ascii") as f:
+            host, _, rec_port = f.read().strip().partition(" ")
+        if host and rec_port == str(port):
+            recorded = host
+    except OSError:
+        pass
+    listen = st["listen"]
+    guess = listen if listen and listen not in ("0.0.0.0", "::") else ""
+    if not guess:
+        try:
+            guess = machine.lan_ip()
+        except OSError:
+            guess = ""
+    for host in dict.fromkeys(h for h in (recorded, guess) if h):
+        try:
+            with socket.create_connection((host, port), timeout=3):
+                return host, None
+        except OSError:
+            continue
+    tried = ", ".join(dict.fromkeys(h for h in (recorded, guess) if h)) or "no address"
+    return (recorded or guess), (f"The admin page does not answer on port {port} at {tried}. Check that the web task is running "
+                                 f"(thessley-pam-win web status) and that this computer has a network address the phone can reach.")
 
 
 def cmd_web(args) -> int:
@@ -239,13 +271,14 @@ def cmd_web(args) -> int:
         st = grants.web_settings()
         if st["localhost_only"]:
             sys.exit("The web page is restricted to this computer. Temporarily allow LAN access before issuing a first-phone link.")
+        ip, problem = web_page_host(st)  # before the token exists: a link nobody can open must not block the next one
+        if problem:
+            sys.exit(problem)
         try:
             token, code, expires = grants.create_web_bootstrap(username, replace_active=args.replace_active)
         except ValueError as exc:
             sys.exit(str(exc))
-        listen = st["listen"]
-        ip = machine.lan_ip() if not listen or listen in ("0.0.0.0", "::") else listen
-        print("\nFIRST-PHONE ENROLLMENT LINK — copy this complete line:")
+        print("\nFIRST-PHONE ENROLLMENT LINK - copy this complete line:")
         print(f"https://{ip}:{st['port']}/{token}")
         print(f"ONE-TIME SETUP CODE (expires in 10 minutes): {code}")
         print(f"This enrolls only the first phone for {username}; it cannot open settings or other accounts.")

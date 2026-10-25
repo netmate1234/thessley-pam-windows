@@ -41,10 +41,32 @@ try {
             $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
             $info = Get-ScheduledTaskInfo -TaskName $TaskName -ErrorAction Stop
             $nextRun = [DateTime]$info.NextRunTime
+            # Get-ScheduledTask can return a localized account label (for
+            # example, "Système" on French Windows). Verify the canonical SID
+            # from the task XML, then fall back to translating the display name.
+            $principalIds = @([string]$task.Principal.UserId)
+            try {
+                $taskXml = [xml](Export-ScheduledTask -TaskName $TaskName -ErrorAction Stop)
+                $principalIds += [string]$taskXml.Task.Principals.Principal.UserId
+            } catch { }
+            $systemPrincipal = $false
+            foreach ($principalId in $principalIds) {
+                if ($principalId -eq 'S-1-5-18') {
+                    $systemPrincipal = $true
+                    break
+                }
+                try {
+                    $principalSid = ([Security.Principal.NTAccount]::new($principalId)).Translate(
+                        [Security.Principal.SecurityIdentifier]).Value
+                    if ($principalSid -eq 'S-1-5-18') {
+                        $systemPrincipal = $true
+                        break
+                    }
+                } catch { }
+            }
             $taskAction = @($task.Actions | Where-Object {
                 $_.Execute -ieq $powerShell -and $_.Arguments -like "*`"$RollbackFile`"*"
             })
-            $systemPrincipal = ([string]$task.Principal.UserId -in @('SYSTEM', 'S-1-5-18'))
             $enabled = ($task.State -ne 'Disabled') -and ($task.Settings.Enabled -ne $false)
             $boundaryDeltaSeconds = [Math]::Abs(($nextRun - $deadline).TotalSeconds)
             if ($enabled -and $systemPrincipal -and $taskAction.Count -gt 0 `

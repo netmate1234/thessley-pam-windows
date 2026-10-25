@@ -5,6 +5,9 @@
   installs, starts, or edits OpenSSH configuration or Windows sign-in policy.
 #>
 $ErrorActionPreference = 'Stop'
+# Over ssh the console code page is not UTF-8; the Python tools print UTF-8. Without this their text arrives garbled.
+try { [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false) } catch { }
+$OutputEncoding = [Text.UTF8Encoding]::new($false)
 
 function Ask-YesNo([string]$Prompt, [bool]$Default = $false) {
     $hint = if ($Default) { '[Y/n]' } else { '[y/N]' }
@@ -255,6 +258,11 @@ if ($enableWeb) {
     if ($anyDevices.Count -eq 0) {
         Write-Host "`nNo phone is enrolled for $bootstrapUser. Creating the one-time first-phone link now."
         $bootstrapResult = Invoke-CliCapture @('web', 'bootstrap', '--user', $bootstrapUser)
+        # The web task was started a moment ago; wait for its listener rather than printing a link nobody can open.
+        for ($attempt = 0; $attempt -lt 10 -and $bootstrapResult.ExitCode -ne 0 -and (($bootstrapResult.Lines -join "`n") -match 'does not answer'); $attempt++) {
+            Start-Sleep -Seconds 3
+            $bootstrapResult = Invoke-CliCapture @('web', 'bootstrap', '--user', $bootstrapUser)
+        }
         $bootstrapOutput = @($bootstrapResult.Lines)
         $bootstrapCreated = $bootstrapResult.ExitCode -eq 0
         if (-not $bootstrapCreated) {

@@ -122,9 +122,22 @@ New-Item -ItemType Directory -Force $stage, $backupRoot, $upgradeBackup | Out-Nu
 
 # The account that ran this elevated installer can manage the web page even if
 # the group lookup is unavailable to the SYSTEM web task.
-$installerAccount = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-$installerAccount = (($installerAccount -split '\\')[-1] -split '@')[0].ToLowerInvariant()
-if ($installerAccount -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$') {
+$currentIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
+# SYSTEM is localized on some Windows installations (for example, "Système").
+# Identify the service account by its stable SID so verified background updates
+# preserve the existing web-admin list instead of treating the localized name as
+# a user account and aborting the update.
+$isSystemInstaller = $currentIdentity.User -and $currentIdentity.User.Value -eq 'S-1-5-18'
+if ($isSystemInstaller) {
+    $installerAccount = 'system'
+} else {
+    try {
+        $installerAccount = (($currentIdentity.Name -split '\\')[-1] -split '@')[0].ToLowerInvariant()
+    } catch {
+        throw 'Could not read the account running the elevated installer; no service files were changed.'
+    }
+}
+if (-not $isSystemInstaller -and $installerAccount -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$') {
     throw 'Could not safely identify the account running the elevated installer; no service files were changed.'
 }
 $webAdminsPath = Join-Path $base 'web-admins.json'
@@ -138,7 +151,7 @@ if (Test-Path -LiteralPath $webAdminsPath -PathType Leaf) {
         throw "Could not safely read the existing web administrator list at $webAdminsPath. No service tasks were changed."
     }
 }
-$webAdminsToKeep = if ($installerAccount -in @('system', 'localsystem')) { $webAdmins } else { @($webAdmins + $installerAccount) }
+$webAdminsToKeep = if ($isSystemInstaller) { $webAdmins } else { @($webAdmins + $installerAccount) }
 $webAdmins = @($webAdminsToKeep | ForEach-Object { ([string]$_).Trim().ToLowerInvariant() } |
     Where-Object { $_ -match '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$' } | Sort-Object -Unique)
 $webAdminsTemp = "$webAdminsPath.tmp-$stamp"

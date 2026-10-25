@@ -40,6 +40,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
@@ -786,6 +787,27 @@ def default_cert_paths() -> tuple[str, str]:
     return os.path.join(d, "cert.pem"), os.path.join(d, "key.pem")
 
 
+def listening_path() -> str:
+    return os.path.join(store.BASE, "web", "listening.txt")
+
+
+def record_listening(host: str, port: int) -> None:
+    """Remember the address the page really serves on, so the one-time first-phone link can name that address (not a guess)."""
+    path = listening_path()
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="ascii") as f:
+        f.write(f"{host} {port}\n")
+    os.replace(tmp, path)
+
+
+def forget_listening() -> None:
+    try:
+        os.remove(listening_path())
+    except OSError:
+        pass
+
+
 def ensure_cert(cert_path: str, key_path: str, ips: list[str]) -> str:
     """A certificate for this page, made once and kept (so a browser asks only once). Returns its SHA-256."""
     if not (os.path.exists(cert_path) and os.path.exists(key_path)):
@@ -855,6 +877,33 @@ def journal_lines() -> list[str]:
 
 
 LOG_LINE = re.compile(r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) (?:INFO|WARN) (.*)$")
+
+
+def record_http_error(method: str, path: str, exc: Exception) -> str:
+    """Record a small, bounded diagnostic for a failed HTTP handler without logging cookies or query tokens."""
+    error_id = secrets.token_hex(4)
+    route = urlsplit(path).path
+    if route.startswith("/wait/") or route.startswith("/status/") or route.startswith("/qr/"):
+        route = "/flow"
+    frames = traceback.extract_tb(exc.__traceback__)[-6:]
+    location = " > ".join(f"{os.path.basename(frame.filename)}:{frame.lineno}:{frame.name}" for frame in frames)
+    line = (f"{datetime.datetime.now().astimezone().isoformat(timespec='seconds')} ERROR {error_id} "
+            f"{method} {route} {type(exc).__name__} at {location}\n")
+    path = os.path.join(store.BASE, "web-errors.log")
+    try:
+        if os.path.exists(path) and os.path.getsize(path) + len(line.encode("utf-8")) > 512_000:
+            rotated = path + ".1"
+            try:
+                os.remove(rotated)
+            except FileNotFoundError:
+                pass
+            os.replace(path, rotated)
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(line)
+    except OSError:
+        # Keep HTTP error reporting best-effort; never let a log failure hide the original fault.
+        pass
+    return error_id
 
 
 ACTIVITY = (
@@ -1497,6 +1546,19 @@ def make_handler(app: WebApp):
 
         # -- routes
         def do_GET(self):  # noqa: N802
+            try:
+                return self._do_GET()
+            except (BrokenPipeError, ConnectionResetError):
+                return
+            except Exception as exc:
+                error_id = record_http_error("GET", self.path, exc)
+                try:
+                    return self.send(500, f"The page failed while being prepared. Error reference: {error_id}\n".encode(),
+                                     "text/plain; charset=utf-8")
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    self.close_connection = True
+
+        def _do_GET(self):
             path = urlsplit(self.path)
             route, query = path.path, {k: v[0] for k, v in parse_qs(path.query).items()}
             s = self.session()
@@ -1599,6 +1661,19 @@ def make_handler(app: WebApp):
             self.html(404, "Not found", flash_html("There is nothing here."), s)
 
         def do_POST(self):  # noqa: N802
+            try:
+                return self._do_POST()
+            except (BrokenPipeError, ConnectionResetError):
+                return
+            except Exception as exc:
+                error_id = record_http_error("POST", self.path, exc)
+                try:
+                    return self.send(500, f"The request failed before it could be completed. Error reference: {error_id}\n".encode(),
+                                     "text/plain; charset=utf-8")
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    self.close_connection = True
+
+        def _do_POST(self):
             route = urlsplit(self.path).path
             data = self.form()
             s = self.session()
@@ -1989,6 +2064,10 @@ def serve() -> int:
             continue
         app.httpd = httpd
         app.rebind_requested = False
+        try:
+            record_listening(ip, st["port"])
+        except OSError as exc:
+            print(f"Could not record the admin page address: {exc}", flush=True)
         print(f"Thessley admin page: https://{ip}:{st['port']}/   certificate SHA-256 {fingerprint}", flush=True)
         try:
             httpd.serve_forever()
@@ -1997,6 +2076,7 @@ def serve() -> int:
         finally:
             app.httpd = None
             httpd.server_close()
+            forget_listening()
         if not app.rebind_requested:
             break
     return 0

@@ -8,6 +8,7 @@ restarted transactionally.
 
 from __future__ import annotations
 
+import datetime
 import os
 import re
 import shutil
@@ -25,6 +26,10 @@ _COMMAND_BEGIN = "# BEGIN THESSLEY SSH QR COMMAND "
 _COMMAND_END = "# END THESSLEY SSH QR COMMAND "
 _BLOCK_BEGIN = "# BEGIN THESSLEY SSH BLOCKED USERS"
 _BLOCK_END = "# END THESSLEY SSH BLOCKED USERS"
+
+
+class UnresolvableAccount(RuntimeError):
+    """sshd cannot look the account up by name (for example a Microsoft account), so no Match User rule can apply to it."""
 
 
 class UnsupportedMatchRule(RuntimeError):
@@ -253,11 +258,37 @@ def _remove_block(lines: list[str], begin: str, end: str, label: str) -> None:
         start = starts[0]
         stop = next((i for i in range(start + 1, len(lines)) if lines[i].strip().casefold() == end.casefold()), None)
         if stop is None:
-            raise RuntimeError(f"The Thessley {label} block is incomplete; no changes were made.")
+            raise RuntimeError(f"The Thessley {label} block is incomplete (the line {lines[start].strip()!r} has no matching "
+                               f"{end!r}); no changes were made. Remove that one line from sshd_config, or run "
+                               "install\\remove-for-reinstall.ps1, then run the installer again.")
         del lines[start:stop + 1]
 
 
+def inside_ssh_session() -> bool:
+    """True when this process was started from an ssh login, which a restart of sshd would cut off."""
+    return bool(os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_CLIENT") or os.environ.get("SSH_TTY"))
+
+
+def _restart_sshd_later(delay_seconds: int = 90) -> str:
+    """Restart sshd from a one-shot SYSTEM task a minute or two from now.
+
+    Restarting sshd ends every ssh session, including the one the guided installer is running in, so the installer would lose its
+    own output (and its last steps) half way. The task runs after the installer has finished and deletes itself. Returns the time."""
+    name = "ThessleySshdRestartOnce"
+    when = (datetime.datetime.now() + datetime.timedelta(seconds=delay_seconds)).strftime("%H:%M")
+    command = f'powershell.exe -NoProfile -Command "Restart-Service sshd -Force; schtasks /Delete /TN {name} /F"'
+    made = subprocess.run(["schtasks", "/Create", "/TN", name, "/SC", "ONCE", "/ST", when, "/RU", "SYSTEM", "/RL", "HIGHEST",
+                           "/TR", command, "/F"], capture_output=True, text=True, errors="replace", timeout=30)
+    if made.returncode:
+        raise RuntimeError("Could not schedule the sshd restart: " + (made.stderr or made.stdout).strip())
+    return when
+
+
 def _restart_sshd() -> None:
+    if inside_ssh_session():
+        when = _restart_sshd_later()
+        print(f"sshd will restart at {when}. This ssh session ends then; log in again to continue (the setup rollback timer stays armed).")
+        return
     restart = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
                               "Restart-Service sshd -Force; if ((Get-Service sshd).Status -ne 'Running') { exit 1 }"],
                              capture_output=True, text=True, timeout=30)
@@ -371,6 +402,8 @@ def set_access(username: str, qr_enabled: bool, blocked: bool, factor: str = "na
                                          f"user={name},host=localhost,addr=127.0.0.1"],
                                         capture_output=True, text=True, timeout=20)
             if effective.returncode or not re.search(r"(?im)^forcecommand .*gate_main\.py", effective.stdout):
+                if "unable to resolve user" in (effective.stderr + effective.stdout).casefold():
+                    raise UnresolvableAccount(f"sshd cannot look up the account {name} by that name; QR approval was not applied to it.")
                 raise RuntimeError(f"sshd did not apply the Thessley gate to {name}.")
             expected_auth = {"key": "authenticationmethods publickey", "password": "authenticationmethods password",
                              "key-password": "authenticationmethods publickey,password"}.get(factor)
@@ -411,6 +444,10 @@ def enable_default_policies() -> tuple[str | None, list[str], list[str]]:
                 path = set_access(username, True, username in blocked, "native", restart_service=False)
             except UnsupportedMatchRule:
                 skipped.append(account["name"])
+                continue
+            except UnresolvableAccount:
+                # one account sshd cannot resolve must not stop the others; set_access already put the config back as it was
+                skipped.append(f"{account['name']} (sshd cannot look this account up, so it was left as it was)")
                 continue
             if backup is None:
                 backup = path
