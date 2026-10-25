@@ -122,13 +122,26 @@ def cancel_setup_rollback_tasks() -> str:
     script = os.path.join(base, "ThessleyPamWin", "confirm-setup.ps1")
     if not os.path.isfile(script):
         raise RuntimeError("The installed setup confirmation script is missing. Reinstall the current Windows package first.")
-    result = subprocess.run(
-        ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script],
-        capture_output=True, text=True, timeout=20, check=False,
-    )
+    try:
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script],
+            capture_output=True, text=True, timeout=45, check=False,
+        )
+    except subprocess.TimeoutExpired:
+        pending = setup_rollback_tasks(refresh=True)
+        if pending == []:
+            return "Setup confirmed. Task Scheduler verifies that no Thessley rollback timer remains."
+        if pending is None:
+            raise RuntimeError("Windows took too long to confirm setup, and the rollback state could not be verified. Refresh Admin before retrying.") from None
+        raise RuntimeError("Windows took too long to confirm setup. A rollback timer is still pending; retry Keep setup and stop rollback.") from None
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "Task Scheduler did not confirm the change.").strip()
         raise RuntimeError(detail[-500:])
+    pending = setup_rollback_tasks(refresh=True)
+    if pending is None:
+        raise RuntimeError("The confirmation command finished, but Task Scheduler could not verify its result. Refresh Admin before retrying.")
+    if pending:
+        raise RuntimeError("A rollback timer is still pending. Setup has not been fully confirmed; retry Keep setup and stop rollback.")
     return (result.stdout or "Setup rollback timers cancelled.").strip()
 
 
