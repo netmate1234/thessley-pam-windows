@@ -73,7 +73,9 @@ try {
     # Schedule recovery before replacing either installed file.
     $powerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     $action = New-ScheduledTaskAction -Execute $powerShell -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$rollbackScript`""
-    $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes($RollbackMinutes)
+    $deadlineUtc = [DateTimeOffset]::UtcNow.AddMinutes($RollbackMinutes)
+    $trigger = New-ScheduledTaskTrigger -Once -At $deadlineUtc.LocalDateTime
+    $trigger.StartBoundary = $deadlineUtc.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", [Globalization.CultureInfo]::InvariantCulture)
     $runAsSystem = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
     $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
     Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $runAsSystem -Settings $settings -Description 'Restores the previous Thessley sign-in files unless the branding update is confirmed.' | Out-Null
@@ -91,8 +93,9 @@ try {
     $base.Dispose()
 }
 
-$deadline = (Get-Date).AddMinutes($RollbackMinutes)
-Write-Host "Thessley sign-in files installed. Automatic restore is scheduled for $deadline."
+$deadlineLocal = $deadlineUtc.ToLocalTime().ToString('yyyy-MM-dd HH:mm:ss zzz')
+$deadlineUniversal = $deadlineUtc.UtcDateTime.ToString('yyyy-MM-dd HH:mm:ss')
+Write-Host "Thessley sign-in files installed. Automatic restore deadline: $deadlineLocal local / $deadlineUniversal UTC."
 Write-Host 'Test a QR sign-in, then run elevated before the deadline:'
 Write-Host "  powershell -ExecutionPolicy Bypass -File `"$(Join-Path $installDir 'confirm.ps1')`""
 Write-Host 'If not confirmed, the prior provider DLL and QR viewer are restored automatically.'

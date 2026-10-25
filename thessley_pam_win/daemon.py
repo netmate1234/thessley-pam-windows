@@ -142,7 +142,7 @@ class Handler(socketserver.StreamRequestHandler):
 
         try:
             normalized = store.normalize_user(user)
-            if not store.devices(normalized) and grants.ssh_fallback_unenrolled():
+            if not store.devices(normalized) and grants.ssh_fallback_unenrolled(normalized):
                 self._send({"say": "No phone is enrolled for this account; continuing with its configured OpenSSH authentication."})
                 log(f"{normalized} used the configured OpenSSH factor because no phone is enrolled", False)
                 return True
@@ -428,7 +428,8 @@ class Server(socketserver.ThreadingTCPServer):
 
 def main() -> int:
     store.ensure_dirs()
-    grants.clear_all()  # a restart ends every pass
+    if not grants.web_settings()["preserve_passes_on_restart"]:
+        grants.clear_all()
     cert_dir = os.path.join(store.BASE, "approvals")
     cert_path, key_path = os.path.join(cert_dir, "cert.pem"), os.path.join(cert_dir, "key.pem")
     shared = None

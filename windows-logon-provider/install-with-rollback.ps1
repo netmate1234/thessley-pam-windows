@@ -59,7 +59,9 @@ Copy-Item -LiteralPath $viewerSource -Destination (Join-Path $installDir 'Thessl
 # Schedule cleanup before registration, so an interrupted install still has a rollback path.
 $powerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 $action = New-ScheduledTaskAction -Execute $powerShell -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$rollbackFile`" -Quiet"
-$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes($RollbackMinutes)
+$deadlineUtc = [DateTimeOffset]::UtcNow.AddMinutes($RollbackMinutes)
+$trigger = New-ScheduledTaskTrigger -Once -At $deadlineUtc.LocalDateTime
+$trigger.StartBoundary = $deadlineUtc.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", [Globalization.CultureInfo]::InvariantCulture)
 $runAsSystem = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
 Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $runAsSystem -Settings $settings -Description 'Removes the Thessley unlock tile registration unless an administrator confirms it.' | Out-Null
@@ -87,8 +89,9 @@ try {
     throw
 }
 
-$deadline = (Get-Date).AddMinutes($RollbackMinutes)
-Write-Host "Thessley unlock tile registered. Automatic rollback is scheduled for $deadline."
+$deadlineLocal = $deadlineUtc.ToLocalTime().ToString('yyyy-MM-dd HH:mm:ss zzz')
+$deadlineUniversal = $deadlineUtc.UtcDateTime.ToString('yyyy-MM-dd HH:mm:ss')
+Write-Host "Thessley unlock tile registered. Automatic rollback deadline: $deadlineLocal local / $deadlineUniversal UTC."
 Write-Host 'Test one unlock and confirm the normal PIN tile is still present. Then run elevated:'
 Write-Host "  powershell -ExecutionPolicy Bypass -File `"$(Join-Path $installDir 'confirm.ps1')`""
 Write-Host 'If you do not confirm, the scheduled task removes only the Thessley provider registry keys.'

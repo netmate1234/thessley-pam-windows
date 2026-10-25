@@ -15,7 +15,8 @@
     4. writes gate.cmd (what sshd will run) and thessley-pam-win.cmd (the admin tool);
     5. creates a scheduled task that starts the service as SYSTEM at boot, and starts it.
 
-  It does NOT change sshd_config, accounts or groups. -OpenFirewall and -OpenWebFirewall allow the Thessley ports from
+  It does NOT change sshd_config, accounts or groups. -PreserveFirewall leaves every Windows Firewall rule untouched.
+  -OpenFirewall and -OpenWebFirewall allow the Thessley ports from
   LocalSubnet and the default VPN ranges 10.8.0.0/24 and 10.8.1.0/24. When OpenSSH is installed, a separate VPN-only
   rule is also added for TCP 22; pass -VpnClientSubnets '' to omit these VPN rules. Add -CloudAccess to scope those requested
   listeners to any remote IP, and -OpenSshFirewall to also allow TCP 22 from any IP. Provider security-group rules
@@ -27,6 +28,8 @@ param(
     [switch]$OpenWebFirewall,   # also allow the admin web page's port (47820) from the local subnet
     [switch]$CloudAccess,        # use RemoteAddress Any for the Thessley listeners
     [switch]$OpenSshFirewall,    # add a separate TCP 22 rule; only valid with CloudAccess
+    [switch]$PreserveFirewall,   # code-only updates leave existing firewall rules exactly as they are
+    [string]$PhoneInterfaceIndex = '', # guided install pins QR and web URLs to a phone-reachable IPv4 adapter
     [string]$VpnClientSubnets = '10.8.0.0/24,10.8.1.0/24',
     [ValidateSet('Private', 'Any')][string]$FirewallProfile = 'Any'   # local-subnet-only rules also work when Windows calls the network Public
 )
@@ -34,6 +37,12 @@ $ErrorActionPreference = 'Stop'
 
 if ($OpenSshFirewall -and -not $CloudAccess) {
     throw 'OpenSshFirewall requires CloudAccess so the TCP 22 rule has an explicit cloud scope.'
+}
+if ($PhoneInterfaceIndex -and $PhoneInterfaceIndex -ne 'auto' -and $PhoneInterfaceIndex -notmatch '^\d+$') {
+    throw 'PhoneInterfaceIndex must be an interface number or auto.'
+}
+if ($PhoneInterfaceIndex -match '^\d+$' -and ([int]$PhoneInterfaceIndex -lt 1 -or [int]$PhoneInterfaceIndex -gt 65535)) {
+    throw 'PhoneInterfaceIndex must be between 1 and 65535.'
 }
 
 if ($VpnClientSubnets) {
@@ -51,8 +60,32 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
 $repo = Split-Path -Parent $PSScriptRoot
 $base = Join-Path $env:ProgramData 'ThessleyPamWin'
 $app  = Join-Path $base 'app'
+$phoneInterfacePath = Join-Path $base 'phone-interface-index.txt'
 $task = 'ThessleyPamWin'
 $webTask = 'ThessleyPamWinWeb'
+
+function Set-PhoneInterfaceSetting([string]$Value) {
+    # Older releases granted Administrators read-only access after writing this
+    # file, which made the next in-place upgrade fail. Give admins write access
+    # before replacing it, then keep the runtime file limited to SYSTEM, admins,
+    # and local users reading the selected adapter index.
+    if (Test-Path -LiteralPath $phoneInterfacePath -PathType Leaf) {
+        icacls $phoneInterfacePath /grant:r '*S-1-5-32-544:F' | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'Could not grant administrators access to update the phone network adapter setting.' }
+    }
+    Set-Content -LiteralPath $phoneInterfacePath -Value $Value -Encoding ascii -NoNewline
+    if ($LASTEXITCODE -ne 0) { throw 'Could not write the phone network adapter setting.' }
+    icacls $phoneInterfacePath /inheritance:r /grant:r '*S-1-5-18:R' '*S-1-5-32-544:F' '*S-1-5-32-545:R' | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Could not secure the phone network adapter setting.' }
+}
+
+function Remove-PhoneInterfaceSetting {
+    if (Test-Path -LiteralPath $phoneInterfacePath -PathType Leaf) {
+        icacls $phoneInterfacePath /grant:r '*S-1-5-32-544:F' | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'Could not grant administrators access to clear the phone network adapter setting.' }
+        Remove-Item -LiteralPath $phoneInterfacePath -Force
+    }
+}
 
 # --- 1. the Python must be out of reach of normal users --------------------------------------------------------------
 $Python = (Resolve-Path $Python).Path
@@ -104,7 +137,8 @@ if (Test-Path -LiteralPath $webAdminsPath -PathType Leaf) {
         throw "Could not safely read the existing web administrator list at $webAdminsPath. No service tasks were changed."
     }
 }
-$webAdmins = @($webAdmins + $installerAccount | ForEach-Object { ([string]$_).Trim().ToLowerInvariant() } |
+$webAdminsToKeep = if ($installerAccount -in @('system', 'localsystem')) { $webAdmins } else { @($webAdmins + $installerAccount) }
+$webAdmins = @($webAdminsToKeep | ForEach-Object { ([string]$_).Trim().ToLowerInvariant() } |
     Where-Object { $_ -match '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$' } | Sort-Object -Unique)
 $webAdminsTemp = "$webAdminsPath.tmp-$stamp"
 $webAdminsJson = @{ version = 1; users = $webAdmins } | ConvertTo-Json -Depth 4
@@ -165,6 +199,8 @@ raise SystemExit(main())
     $restorePreviousTasks = $appExisted
     $serviceWasEnabled = $serviceExisted -and $oldService.State -ne 'Disabled'
     $webWasEnabled = $false
+    $phoneInterfaceFileExisted = Test-Path -LiteralPath $phoneInterfacePath -PathType Leaf
+    $phoneInterfaceFileContent = if ($phoneInterfaceFileExisted) { Get-Content -Raw -LiteralPath $phoneInterfacePath } else { '' }
     $configPath = Join-Path $base 'config.json'
     if ($appExisted -and $webExisted -and (Test-Path -LiteralPath $configPath -PathType Leaf)) {
         try {
@@ -206,6 +242,19 @@ raise SystemExit(main())
         if ($appExisted) { Move-Item -LiteralPath $app -Destination $previousApp; $oldAppMoved = $true }
         Move-Item -LiteralPath $stage -Destination $app
         $newAppMoved = $true
+
+        if ($PhoneInterfaceIndex) {
+            if ($PhoneInterfaceIndex -eq 'auto') {
+                Remove-PhoneInterfaceSetting
+                Write-Host 'Phone address selection: Windows automatic route.'
+            } else {
+                $selectedAddress = Get-NetIPAddress -InterfaceIndex ([int]$PhoneInterfaceIndex) -AddressFamily IPv4 -AddressState Preferred -ErrorAction SilentlyContinue |
+                    Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' } | Select-Object -First 1
+                if (-not $selectedAddress) { throw "Selected phone network adapter $PhoneInterfaceIndex has no usable IPv4 address. Rerun the installer and choose an active adapter." }
+                Set-PhoneInterfaceSetting -Value $PhoneInterfaceIndex
+                Write-Host "Phone address selection: $($selectedAddress.IPAddress) on interface $PhoneInterfaceIndex. DHCP address changes on this adapter will be followed automatically."
+            }
+        }
 
         $run = "`"$Python`" -I -X utf8"
         Set-Content -Encoding ascii -LiteralPath $gateLauncher -Value "@$run `"$app\gate_main.py`""
@@ -252,6 +301,11 @@ raise SystemExit(main())
         else { Remove-Item -LiteralPath $gateLauncher -Force -ErrorAction SilentlyContinue }
         if ($cliLauncherExisted) { Copy-Item -LiteralPath (Join-Path $upgradeBackup 'thessley-pam-win.cmd') -Destination $cliLauncher -Force }
         else { Remove-Item -LiteralPath $cliLauncher -Force -ErrorAction SilentlyContinue }
+        if ($phoneInterfaceFileExisted) {
+            Set-PhoneInterfaceSetting -Value $phoneInterfaceFileContent
+        } else {
+            Remove-PhoneInterfaceSetting
+        }
         if ($restorePreviousTasks -and $serviceExisted) {
             Register-ScheduledTask -TaskName $task -Xml (Get-Content -Raw -LiteralPath (Join-Path $upgradeBackup 'service.xml')) -Force | Out-Null
             if ($serviceWasEnabled) { Enable-ScheduledTask -TaskName $task | Out-Null; Start-ScheduledTask -TaskName $task }
@@ -280,7 +334,22 @@ raise SystemExit(main())
 
 Write-Host 'The approval service is healthy. Refreshing bundled helper downloads...'
 
-# --- 5. optional firewall rule for the phone/app to reach the approval window --------------------------------------------
+# New installations start with a four-hour SSH approval pass. Do not change an
+# existing installation's grace setting during an upgrade; administrators can
+# still adjust or disable it in Admin (0 means ask for approval every login).
+if (-not $appExisted -and -not (Test-Path -LiteralPath $configPath -PathType Leaf)) {
+    & $Python -I -X utf8 (Join-Path $app 'cli_main.py') grace --hours 4
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning 'The service is installed, but the four-hour default could not be saved. Set it in Admin under “How long one approval counts”.'
+    } else {
+        Write-Host 'Default SSH approval pass: 4 hours (changeable in Admin).'
+    }
+}
+
+# --- 5. optional firewall rules -----------------------------------------------------------------------------------------
+if ($PreserveFirewall) {
+    Write-Host 'Firewall rules were preserved during this code update.'
+} else {
 if ($OpenFirewall) {
     Remove-NetFirewallRule -DisplayName 'Thessley Passkey approvals' -ErrorAction SilentlyContinue
     Remove-NetFirewallRule -DisplayName 'Thessley Passkey approvals VPN' -ErrorAction SilentlyContinue
@@ -325,6 +394,42 @@ if ($OpenSshFirewall) {
     New-NetFirewallRule -DisplayName 'Thessley OpenSSH cloud access' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 22 `
         -Profile Any -RemoteAddress Any | Out-Null
     Write-Host 'Firewall: allowed OpenSSH on TCP 22 from any remote address for cloud access.'
+}
+}
+
+# --- 6. install the SYSTEM-owned weekly update task ---------------------------------------------------------------------
+$updateScript = Join-Path $PSScriptRoot 'update.ps1'
+if (Test-Path -LiteralPath $updateScript -PathType Leaf) {
+    try {
+        $installedUpdater = Join-Path $base 'update.ps1'
+        Copy-Item -LiteralPath $updateScript -Destination $installedUpdater -Force
+        $updateEnabled = $true
+        if (Test-Path -LiteralPath $configPath -PathType Leaf) {
+            try {
+                $saved = Get-Content -Raw -LiteralPath $configPath | ConvertFrom-Json
+                if ($saved.web -and $null -ne $saved.web.auto_updates_enabled) {
+                    $updateEnabled = [bool]$saved.web.auto_updates_enabled
+                }
+            } catch {
+                $updateEnabled = $false
+                Write-Warning 'Could not read the saved automatic-update setting; the scheduled updater was left disabled.'
+            }
+        }
+        $powershellExe = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        $updateAction = New-ScheduledTaskAction -Execute $powershellExe -Argument "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$installedUpdater`""
+        $updateTrigger = New-ScheduledTaskTrigger -Weekly -WeeksInterval 1 -DaysOfWeek Sunday -At ([datetime]::Today.AddHours(3))
+        $updatePrincipal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+        $updateSettings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Hours 2) -MultipleInstances IgnoreNew `
+            -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+        Register-ScheduledTask -TaskName 'ThessleyPamWinUpdate' -Action $updateAction -Trigger $updateTrigger `
+            -Principal $updatePrincipal -Settings $updateSettings -Description 'Thessley weekly verified service update' -Force | Out-Null
+        if ($updateEnabled) { Enable-ScheduledTask -TaskName 'ThessleyPamWinUpdate' | Out-Null }
+        else { Disable-ScheduledTask -TaskName 'ThessleyPamWinUpdate' | Out-Null }
+        if ($updateEnabled) { Write-Host 'Automatic updates are enabled: every Sunday at 03:00 local time.' }
+        else { Write-Host 'Automatic updates are disabled; enable them in Admin > Settings.' }
+    } catch {
+        Write-Warning "Could not configure the automatic-update task. The service remains installed; rerun the installer to repair it. $($_.Exception.Message)"
+    }
 }
 
 $cli = Join-Path $base 'thessley-pam-win.cmd'

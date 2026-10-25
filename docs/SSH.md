@@ -45,7 +45,8 @@ approvers or writes passes, or that person could add their own phone or forge a 
 A pass is tied to the user and the client's address (from `SSH_CONNECTION`), to the approver that granted it, and has a
 fixed end. It does not know which password was used: whoever gets past the password step for that account from the same
 address during the window skips the approval. Behind a shared (NAT) address that can be more than one machine. Keep
-the window short; `thessley-pam-win end-pass` ends passes at once. Turned off by default (`grace 0`).
+the window short; `thessley-pam-win end-pass` ends passes at once. Fresh installs start at 4 hours; change the value
+in Admin or with `thessley-pam-win grace --hours H`. Set it to 0 to ask for approval on every login.
 
 ### Limits to know about
 
@@ -100,6 +101,58 @@ SSH login works before adding Thessley's account-specific `Match` block. The The
 only opens its phone approval listener on TCP 47810; it does not open SSH port 22. See Microsoft's
 [OpenSSH Server installation guide](https://learn.microsoft.com/en-us/windows-server/administration/openssh/openssh_install_firstuse?pivots=windows-11).
 
+**Create and install a client key before continuing.** Generate it on the computer you will connect from, never on the
+Windows SSH server. If a Windows PC is the SSH client, run this in PowerShell. It keeps an existing key and generates
+one only when needed:
+
+    $sshDir = Join-Path $HOME '.ssh'
+    New-Item -ItemType Directory -Path $sshDir -Force | Out-Null
+    $privateKey = Join-Path $sshDir 'id_ed25519'
+    if (-not (Test-Path -LiteralPath $privateKey)) { ssh-keygen.exe -t ed25519 -a 64 -f $privateKey -C 'windows-admin' }
+    $publicKey = "${privateKey}.pub"
+    Get-Content -LiteralPath $publicKey
+
+To avoid copying the key text, transfer only the `.pub` file from this Windows client. This requires password SSH login
+to already work on the Windows server; `scp` prompts for that account's password:
+
+    $publicKey = Join-Path (Join-Path $HOME '.ssh') 'id_ed25519.pub'
+    $target = Read-Host 'Windows server account and address (example: martin@192.168.1.190)'
+    scp.exe $publicKey "${target}:thessley-admin.pub"
+
+If Ubuntu or macOS is the computer you will connect from, use this Bash block in its terminal instead (not in PowerShell):
+
+    if [ ! -f "$HOME/.ssh/id_ed25519" ]; then ssh-keygen -t ed25519 -a 64 -f "$HOME/.ssh/id_ed25519" -C "windows-admin"; fi
+    cat "$HOME/.ssh/id_ed25519.pub"
+
+To transfer the public-key file without copying its text (password SSH login must already work):
+
+    read -r -p 'Windows server account and address (username@address): ' target
+    scp "$HOME/.ssh/id_ed25519.pub" "${target}:thessley-admin.pub"
+
+On the Windows SSH server, run the documented administrator PowerShell import block. It reads the transferred
+`thessley-admin.pub` file from the account's home directory when present; otherwise it prompts for the public-key line.
+For completeness, this is the import block to run in elevated PowerShell on that server:
+
+    $ErrorActionPreference = 'Stop'
+    $publicKeyFile = Join-Path $HOME 'thessley-admin.pub'
+    if (Test-Path -LiteralPath $publicKeyFile) {
+        $key = (Get-Content -Raw -LiteralPath $publicKeyFile).Trim()
+    } else {
+        $key = Read-Host 'Paste the complete one-line PUBLIC key from id_ed25519.pub'
+    }
+    if ($key -notmatch '^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256)\s+[A-Za-z0-9+/]+=*(\s+.*)?$') { throw 'Invalid public-key line.' }
+    $sshDir = Join-Path $env:ProgramData 'ssh'
+    New-Item -ItemType Directory -Path $sshDir -Force | Out-Null
+    $path = Join-Path $sshDir 'administrators_authorized_keys'
+    Add-Content -LiteralPath $path -Value $key -Encoding ascii
+    icacls.exe $path /inheritance:r /grant '*S-1-5-32-544:F' /grant '*S-1-5-18:F'
+    if ($LASTEXITCODE -ne 0) { throw 'Could not set the authorized-key file permissions.' }
+    if (Test-Path -LiteralPath $publicKeyFile) { Remove-Item -LiteralPath $publicKeyFile -Force }
+
+Never transfer the private `id_ed25519` file. From Windows PowerShell, test with `ssh -i "$HOME\.ssh\id_ed25519" WINDOWS_ADMIN@WINDOWS_IP`;
+from Ubuntu/macOS Bash, use `ssh -i "$HOME/.ssh/id_ed25519" WINDOWS_ADMIN@WINDOWS_IP`. Confirm that key login reaches a prompt
+before changing any Thessley SSH policy.
+
 **Keep OpenSSH setup separate from Thessley setup.** Install and verify `sshd` first from the Windows console. This gives
 you a working remote shell before installing the approval service. Do not change `sshd_config` as part of the initial
 remote install. Use a stable LAN or VPN address, and keep an existing SSH session open throughout the later gate setup.
@@ -131,6 +184,12 @@ open and test a second login. The same installer can optionally stage the experi
 change also has a rollback timer. Keep PIN/password recovery available and run the installed `confirm-setup.ps1` only
 after each selected login method succeeds.
 
+If Windows has multiple active IPv4 adapters, the guided installer lists their addresses and asks which one the phone can
+reach. Choose the LAN or VPN address the phone will use; in a VM, avoid a private NAT-only address. The installer stores
+the adapter index and resolves its current IPv4 address when generating links, so DHCP changes on that adapter are
+followed without changing Windows route metrics. The automatic option follows Windows' default route and can select a
+VM-only NAT address.
+
 When installing from a downloaded ZIP instead of the hosted bootstrap, transfer and extract it first, then run the package's
 `guided-install.ps1` in the elevated interactive PowerShell session. Do not run the hosted bootstrap and the manual package
 installer as two separate installs.
@@ -154,7 +213,8 @@ installer as two separate installs.
 
    **Firewall note:** the installer option `-OpenFirewall` opens TCP 47810 from the local subnet on all Windows network
    profiles by default. Phone approval and enrollment share the service-owned TCP 47810 listener, including concurrent requests. Direct installs also allow VPN client subnets `10.8.0.0/24,10.8.1.0/24` by default; pass `-VpnClientSubnets ''` to omit them. The guided installer asks for additional VPN client subnets, defaulting to
-   `10.8.0.0/24,10.8.1.0/24`. Answer `Y` or press Enter to allow both, `N` to skip, or enter custom comma-separated IPv4 CIDR subnets.
+   `10.8.0.0/24,10.8.1.0/24`. Answer `Y` or press Enter to allow both, `N` to skip, or enter custom comma-separated IPv4 CIDRs.
+   If the phone reports a source IP outside those ranges, use that exact IP with `/32` (for example `10.31.19.228/32`) or enter its VPN subnet.
    The installer applies the selected subnets to SSH (TCP 22), the phone approval port (47810) and, when enabled, the web page (47820). SSH retains its existing LocalSubnet rule and adds a separate VPN-only rule;
    approval and web listeners keep their LocalSubnet rule plus a separate VPN-only rule. The source remains limited to those networks;
    pass `-FirewallProfile Private` to restrict the rules to Private networks only.

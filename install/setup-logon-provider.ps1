@@ -16,7 +16,7 @@ try {
         throw 'The sign-in package is incomplete; no credential provider changes were made.'
     }
     $task = Get-ScheduledTask -TaskName 'ThessleyCredentialProviderRollback' -ErrorAction SilentlyContinue
-    if ($task) { throw 'A sign-in rollback is already active. Confirm or wait for that rollback before installing again.' }
+    if ($task) { throw 'A sign-in rollback is already active. Do not install the tile again yet. In Thessley Admin > Settings, test the current sign-in, then choose Keep setup and stop rollback; or let the timer finish.' }
     $providerId = '{B78189D3-4FE6-4E6B-A143-D63D6436E96B}'
     $registered = Test-Path "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\$providerId"
     if ($registered) {

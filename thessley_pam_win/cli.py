@@ -240,7 +240,7 @@ def cmd_web(args) -> int:
         if st["localhost_only"]:
             sys.exit("The web page is restricted to this computer. Temporarily allow LAN access before issuing a first-phone link.")
         try:
-            token, code, expires = grants.create_web_bootstrap(username)
+            token, code, expires = grants.create_web_bootstrap(username, replace_active=args.replace_active)
         except ValueError as exc:
             sys.exit(str(exc))
         listen = st["listen"]
@@ -356,6 +356,7 @@ def main(argv=None) -> int:
     wb.add_argument("action", nargs="?", choices=("status", "on", "off", "serve", "listen", "port", "session", "cert", "bootstrap"))
     wb.add_argument("values", nargs="*")
     wb.add_argument("--user", help="administrator account for one-time first-phone setup")
+    wb.add_argument("--replace-active", action="store_true", help="invalidate an existing active first-phone link and issue a new one")
     sc = sub.add_parser("sshd-config", help="the sshd_config lines for a user")
     sc.add_argument("--user")
     sc.add_argument("--factor", choices=("password", "key", "key-password"), default="password",

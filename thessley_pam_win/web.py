@@ -22,6 +22,7 @@ one). `web status` prints its fingerprint.
 from __future__ import annotations
 
 import base64
+import csv
 import datetime
 import errno
 import hashlib
@@ -47,7 +48,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
-from . import enroll, firewall, grants, machine, ssh_policy, store
+from . import enroll, firewall, grants, machine, ssh_policy, store, update_task
 
 TTY_LOGIN, TTY_CHANGE, TTY_DEVICE = "web", "web-change", "add-device"  # what approve.run is told (it names them for the apps)
 
@@ -68,38 +69,149 @@ def now() -> float:
     return time.time()
 
 
+_ROLLBACK_CACHE: tuple[float, list[str] | None] = (0.0, None)
+_ROLLBACK_CACHE_LOCK = threading.Lock()
+_ROLLBACK_REFRESHING = False
+
+
+def _fetch_setup_rollback_tasks() -> list[str] | None:
+    global _ROLLBACK_CACHE
+    try:
+        result = subprocess.run(
+            ["schtasks.exe", "/Query", "/FO", "CSV", "/NH"],
+            capture_output=True, text=True, timeout=15, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        tasks = None
+    else:
+        tasks = None
+        if result.returncode == 0:
+            try:
+                names = set()
+                for row in csv.reader(result.stdout.splitlines()):
+                    if not row:
+                        continue
+                    task_name = row[0].strip().replace("/", "\\").split("\\")[-1]
+                    if (task_name == "ThessleyCredentialProviderRollback"
+                            or re.fullmatch(r"ThessleySSHConfigRollback-[A-Za-z0-9_.-]{1,64}", task_name)):
+                        names.add(task_name)
+                tasks = sorted(names)
+            except csv.Error:
+                tasks = None
+    with _ROLLBACK_CACHE_LOCK:
+        _ROLLBACK_CACHE = (time.monotonic(), tasks)
+    return list(tasks) if tasks is not None else None
+
+
+def _refresh_setup_rollback_background() -> None:
+    global _ROLLBACK_REFRESHING
+    try:
+        _fetch_setup_rollback_tasks()
+    except Exception:
+        pass
+    finally:
+        with _ROLLBACK_CACHE_LOCK:
+            _ROLLBACK_REFRESHING = False
+
+
+def setup_rollback_tasks(refresh: bool = False) -> list[str] | None:
+    """Return only Thessley setup rollback task names, without launching PowerShell on page loads."""
+    global _ROLLBACK_CACHE, _ROLLBACK_REFRESHING
+    with _ROLLBACK_CACHE_LOCK:
+        cached_at, cached = _ROLLBACK_CACHE
+        # A failed Task Scheduler query must not leave the Admin page showing
+        # an unavailable warning for a full cache interval.
+        ttl = 60 if cached is not None else 5
+        expired = time.monotonic() - cached_at >= ttl
+        if not refresh and cached_at > 0:
+            if expired and not _ROLLBACK_REFRESHING:
+                _ROLLBACK_REFRESHING = True
+                threading.Thread(target=_refresh_setup_rollback_background, daemon=True).start()
+            return list(cached) if cached is not None else None
+    return _fetch_setup_rollback_tasks()
+
+
+def cancel_setup_rollback_tasks() -> str:
+    """Use the installer-owned confirmation script; never accept a path or task name from the browser."""
+    base = os.environ.get("ProgramData", r"C:\ProgramData")
+    script = os.path.join(base, "ThessleyPamWin", "confirm-setup.ps1")
+    if not os.path.isfile(script):
+        raise RuntimeError("The installed setup confirmation script is missing. Reinstall the current Windows package first.")
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script],
+        capture_output=True, text=True, timeout=20, check=False,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "Task Scheduler did not confirm the change.").strip()
+        raise RuntimeError(detail[-500:])
+    return (result.stdout or "Setup rollback timers cancelled.").strip()
+
+
 # ---- who is an administrator -------------------------------------------------------------------------------------
 
 _ADMIN_CACHE: dict = {"at": 0.0, "names": set()}
+_ADMIN_CACHE_LOCK = threading.Lock()
+_ADMIN_REFRESHING = False
+
+
+def _fetch_admin_names() -> set[str] | None:
+    system_root = os.environ.get("SystemRoot", r"C:\Windows")
+    powershell = os.path.join(system_root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+    if not os.path.isfile(powershell):
+        powershell = "powershell.exe"
+    try:
+        result = subprocess.run(
+            [powershell, "-NoProfile", "-NonInteractive", "-Command",
+             "Get-LocalGroupMember -SID S-1-5-32-544 | ForEach-Object { $_.Name }"],
+            capture_output=True, text=True, errors="replace", timeout=20)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    names: set[str] = set()
+    for line in result.stdout.splitlines():
+        try:
+            names.add(store.normalize_user(line))
+        except ValueError:
+            continue
+    with _ADMIN_CACHE_LOCK:
+        _ADMIN_CACHE.update(at=time.monotonic(), names=names)
+    return names
+
+
+def _refresh_admin_names_background() -> None:
+    global _ADMIN_REFRESHING
+    try:
+        _fetch_admin_names()
+    finally:
+        with _ADMIN_CACHE_LOCK:
+            _ADMIN_REFRESHING = False
 
 
 def admin_names() -> set[str]:
     """The members of the local Administrators group (by its well-known SID, so any language), as plain account names."""
-    if now() - _ADMIN_CACHE["at"] >= 120:
-        names: set[str] = set()
-        system_root = os.environ.get("SystemRoot", r"C:\Windows")
-        powershell = os.path.join(system_root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
-        if not os.path.isfile(powershell):
-            powershell = "powershell.exe"
-        try:
-            result = subprocess.run(
-                [powershell, "-NoProfile", "-NonInteractive", "-Command",
-                 "Get-LocalGroupMember -SID S-1-5-32-544 | ForEach-Object { $_.Name }"],
-                capture_output=True, text=True, errors="replace", timeout=20)
-            for line in result.stdout.splitlines():
-                try:
-                    names.add(store.normalize_user(line))
-                except ValueError:
-                    continue
-        except (OSError, subprocess.TimeoutExpired):
-            pass
-        _ADMIN_CACHE.update(at=now(), names=names)
-    return set(_ADMIN_CACHE["names"]) | grants.web_admins()
+    global _ADMIN_REFRESHING
+    with _ADMIN_CACHE_LOCK:
+        cached_at = _ADMIN_CACHE["at"]
+        cached_names = set(_ADMIN_CACHE["names"])
+        if cached_at and time.monotonic() - cached_at < 120:
+            return cached_names | grants.web_admins()
+        if cached_at and not _ADMIN_REFRESHING:
+            _ADMIN_REFRESHING = True
+            threading.Thread(target=_refresh_admin_names_background, daemon=True).start()
+            return cached_names | grants.web_admins()
+    names = _fetch_admin_names()
+    return (names if names is not None else cached_names) | grants.web_admins()
 
 
 def is_admin(username: str) -> bool:
     try:
-        return store.normalize_user(username) in admin_names()
+        normalized = store.normalize_user(username)
+        # The installer grants its administrator explicitly. Avoid starting
+        # PowerShell merely to rediscover that same grant on every page visit.
+        if normalized in grants.web_admins():
+            return True
+        return normalized in admin_names()
     except ValueError:
         return False
 
@@ -176,6 +288,14 @@ class WebApp:
         self.qr = qr or qr_svg
         self.httpd = None
         self.rebind_requested = False
+        # Warm the Windows-only lookups outside the first page request. These
+        # are cached by their modules and reused by Admin rendering.
+        if os.name == "nt":
+            for target, args in ((setup_rollback_tasks, (True,)),
+                                 (ssh_policy.local_accounts, (True,)),
+                                 (machine.interface_networks, ("local", True)),
+                                 (admin_names, ())):
+                threading.Thread(target=target, args=args, daemon=True).start()
 
     def rebind(self) -> None:
         """Restart the listener after an administrator changes its bind address."""
@@ -455,6 +575,22 @@ class WebApp:
                 size, count = map(int, value.split(",", 1))
                 grants.set_web(log_max_bytes=size, log_rotations=count)
                 return "/admin", "Log size and rotation retention saved."
+            if name == "auto_updates":
+                enabled = value == "on"
+                update_task.set_enabled(enabled)
+                grants.set_web(auto_updates_enabled=enabled)
+                return "/admin", ("Automatic updates enabled: every Sunday at 03:00 local time."
+                                   if enabled else "Automatic updates disabled. A currently running update is allowed to finish.")
+            if name == "preserve_passes_restart":
+                enabled = value == "on"
+                grants.set_web(preserve_passes_on_restart=enabled)
+                self.log("web page: SSH approval pass retention across service restarts " + ("enabled" if enabled else "disabled"), False)
+                return "/admin", ("Four-hour SSH approval passes will survive service restarts and updates."
+                                   if enabled else "The next approval-service restart will clear all four-hour SSH approval passes.")
+            if name == "confirm_setup":
+                output = cancel_setup_rollback_tasks()
+                self.log("web page: administrator confirmed the Windows setup and cancelled rollback timers", False)
+                return "/admin", output or "Setup confirmed. No pending Thessley rollback timer remained."
             if name == "localhost_only":
                 local_only = value == "on"
                 grants.set_web(localhost_only=local_only)
@@ -504,6 +640,17 @@ class WebApp:
             state = f"SSH {'blocked' if blocked else 'allowed'}; QR {'required when enrolled' if qr_enabled else 'not required'}"
             self.log(f"web page: {state} for SSH account {target}; backup {backup}", False)
             return "/admin", f"{state} for {target}. sshd was validated and restarted; config backup: {backup}"
+        return run
+
+    def change_ssh_user_fallback(self, username: str, enabled: bool | None):
+        target = store.normalize_user(username)
+
+        def run():
+            grants.set_ssh_fallback_user(target, enabled)
+            effective = grants.ssh_fallback_unenrolled(target)
+            state = "allow normal SSH until first phone enrollment" if effective else "refuse SSH until first phone enrollment"
+            self.log(f"web page: first-phone SSH fallback for {target} set to {state}", False)
+            return "/admin", f"First-phone SSH behavior for {target}: {state}."
         return run
 
     # -- per-key details
@@ -765,6 +912,8 @@ nav a,.link{color:var(--accent);text-decoration:none}nav a{display:inline-flex;a
 .user-section h3{margin:0 0 .45rem}.user-section>p{margin:0 0 14px}
 .dim{color:var(--dim);font-size:.9rem}.ok{color:var(--ok)}.bad{color:var(--danger)}
 input[type=text]{width:100%;padding:10px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);font-size:1rem}
+select{max-width:100%;padding:9px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);font-size:1rem}
+.ssh-policy-row{display:grid;gap:14px}.ssh-policy-row form{display:grid;gap:10px}.ssh-policy-row label{display:grid;gap:4px}.ssh-policy-row select{width:100%;min-width:0}
 button{min-height:44px;padding:9px 14px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--fg);font-size:.95rem;cursor:pointer}
 .btn{display:inline-block;padding:11px 18px;border-radius:8px;background:var(--accent);color:#fff;text-decoration:none;font-weight:600}
 .btn.small{padding:7px 12px;font-size:.9rem}
@@ -1056,14 +1205,27 @@ def admin_page(viewer: Session, flash: str, listener_host: str = "") -> str:
               f'<form method="post" action="/admin/set" class="row">{hidden}<input type="hidden" name="name" value="self_enroll">'
               f'<button name="value" value="{"off" if first else "on"}">Switch {"off" if first else "on"}</button></form></div>')
     fallback = grants.ssh_fallback_unenrolled()
-    ssh_fallback = (f'<div class="card"><strong>SSH fallback when a user has never enrolled a phone</strong>: '
-                    f'<span class="{"ok" if fallback else "bad"}">{on(fallback)}</span>'
-                    '<div class="dim">When on, a QR-enabled account with no enrolled phone can still use its configured OpenSSH key/password. '
-                    'Once a phone is enrolled, QR approval is required. Accounts with a disabled or lost phone do not use this fallback.</div>'
+    ssh_fallback = (f'<div class="card"><strong>When a user has never enrolled a phone</strong>: '
+                    f'<span class="{"ok" if fallback else "bad"}">{"Allow normal SSH" if fallback else "Refuse SSH"}</span>'
+                    '<div class="dim">Allow normal OpenSSH authentication until the first phone is enrolled, or refuse logins until enrollment. '
+                    'This applies only when the account has never had a device. If all its enrolled devices are disabled, login is refused.</div>'
                     f'<form method="post" action="/admin/set" class="row">{hidden}<input type="hidden" name="name" value="ssh_fallback_unenrolled">'
-                    f'<button name="value" value="{"off" if fallback else "on"}">Switch {"off" if fallback else "on"}</button></form></div>')
+                    f'<label>Unenrolled account behavior <select name="value"><option value="on"{" selected" if fallback else ""}>Allow normal SSH until first enrollment</option>'
+                    f'<option value="off"{" selected" if not fallback else ""}>Refuse SSH until first enrollment</option></select></label> '
+                    '<button>Save behavior</button></form></div>')
     session = grants.web_settings()["session_minutes"]
     settings = grants.web_settings()
+    rollback_tasks = setup_rollback_tasks()
+    rollback_status = ("<p class='bad'>Could not check Task Scheduler right now; refresh this page in a moment.</p>"
+                       if rollback_tasks is None else
+                       ("<ul>" + "".join(f"<li><code>{esc(task)}</code></li>" for task in rollback_tasks) + "</ul>"
+                        if rollback_tasks else "<p class='ok'>No Thessley setup rollback timer is pending.</p>"))
+    rollback = ("<div class='card'><strong>Windows sign-in rollback</strong>" + rollback_status
+                + "<p class='dim'>After you have verified Windows sign-in works, keep this setup by stopping its automatic rollback. "
+                  "This asks your phone for a fresh approval. Until then, the recovery timer stays active.</p>"
+                + (f"<form method='post' action='/admin/set' class='row'>{hidden}<input type='hidden' name='name' value='confirm_setup'>"
+                   "<input type='hidden' name='value' value='yes'><button>Keep setup and stop rollback</button></form>"
+                   if rollback_tasks else "") + "</div>")
     grace += (f'<div class="card"><strong>Stay signed in to this page</strong>: {session} minutes without activity'
               f'<div class="dim">After this long without clicking anything you are signed out (always after 8 hours). '
               f'Applies from the next sign-in. 1 to 240 minutes.</div>'
@@ -1083,6 +1245,27 @@ def admin_page(viewer: Session, flash: str, listener_host: str = "") -> str:
                f'<input type="number" name="size" min="100000" max="10000000" step="100000" value="{settings["log_max_bytes"]}" aria-label="Maximum log file bytes"> bytes/file '
                f'<input type="number" name="count" min="1" max="20" value="{settings["log_rotations"]}" aria-label="Rotated log count"> backups '
                f'<button>Save rotation</button></form></div>')
+    update_state = update_task.last_run()
+    update_error = (f'<p class="bad">Last update error: {esc(update_state["last_error"])}</p>'
+                    if update_state.get("last_error") else "")
+    updates = (f'<div class="card"><strong>Automatic Windows updates</strong>: '
+               f'<span class="{"ok" if settings["auto_updates_enabled"] else "bad"}">{on(settings["auto_updates_enabled"])}</span>'
+               f'<div class="dim">When enabled, the service checks for a package update every Sunday at 03:00 local time. '
+               'It verifies the ZIP against the hash pinned in the HTTPS installer, stages the update, and keeps the previous app for rollback. '
+               'SSH policy, firewall rules, enrolled phones, and passes are preserved. New QR-gated SSH approvals may pause briefly while the service restarts. '
+               f'Last check: {esc(update_task.display_time(update_state.get("last_check_utc", "")))}. '
+               f'Last successful update: {esc(update_task.display_time(update_state.get("last_success_utc", "")))}.</div>'
+               f'{update_error}<form method="post" action="/admin/set" class="row">{hidden}<input type="hidden" name="name" value="auto_updates">'
+               f'<button name="value" value="{"off" if settings["auto_updates_enabled"] else "on"}">'
+               f'{"Turn automatic updates off" if settings["auto_updates_enabled"] else "Turn automatic updates on"}</button></form></div>')
+    preserve_passes = settings["preserve_passes_on_restart"]
+    pass_retention = (f'<div class="card"><strong>Keep four-hour SSH approvals after service restarts</strong>: '
+                      f'<span class="{"ok" if preserve_passes else "bad"}">{on(preserve_passes)}</span>'
+                      '<div class="dim">When on, approved passes keep their original expiry across app updates and Windows restarts. '
+                      'They remain tied to the same SSH client IP and an active enrolled phone. When off, the next approval-service start clears all passes. '
+                      'Changing this setting does not end existing passes immediately.</div>'
+                      f'<form method="post" action="/admin/set" class="row">{hidden}<input type="hidden" name="name" value="preserve_passes_restart">'
+                      f'<button name="value" value="{"off" if preserve_passes else "on"}">Turn pass retention {"off" if preserve_passes else "on"}</button></form></div>')
     # Show the address the live socket is actually bound to. This avoids stale or
     # default configuration values making the help text point at loopback when
     # the listener is serving the LAN (or vice versa).
@@ -1135,48 +1318,74 @@ def admin_page(viewer: Session, flash: str, listener_host: str = "") -> str:
         active_policies = ssh_policy.policies()
         custom_users = ssh_policy.custom_match_users()
         rows = []
+        blocked_users = ssh_policy.blocked_users()
         for account in accounts:
             username = account["name"]
             normalized = store.normalize_user(username)
             factor = active_policies.get(normalized)
-            if factor == "manual" or normalized in custom_users:
-                blocked = normalized in ssh_policy.blocked_users()
-                blocked_checked = " checked" if blocked else ""
-                qr_checked = " checked" if factor != "manual" else ""
-                rows.append(
-                    "<form method='post' action='/admin/set' class='card ssh-policy-row'>" + hidden +
-                    "<input type='hidden' name='name' value='ssh_policy'>" +
-                    f"<input type='hidden' name='user' value='{esc(username)}'>" +
-                    "<input type='hidden' name='factor' value='native'>" +
-                    f"<label><input type='checkbox' name='enabled' value='on'{qr_checked}> Require QR approval</label> "
-                    f"<label><input type='checkbox' name='blocked' value='on'{blocked_checked}> Block SSH for <strong>{esc(username)}</strong></label> "
-                    f"<button>Save</button><div class='dim'>A custom <code>Match User</code> rule exists. Its current key/password settings are preserved; this page only adds or removes the QR gate and SSH block.</div></form>"
-                )
-                continue
-            device_ready = bool(store.active_devices(normalized))
-            qr_checked = " checked" if normalized in active_policies else ""
-            blocked = normalized in ssh_policy.blocked_users()
-            blocked_checked = " checked" if blocked else ""
-            factor = factor or "native"
-            device_note = ("An active phone is enrolled; QR approval is required." if device_ready else
-                           f"No active phone. The configured fallback applies until {esc(username)} enrolls one. "
-                           f"<a href='/keys?user={esc(username)}'>Manage {esc(username)}'s devices</a>.")
+            custom_match = factor == "manual" or normalized in custom_users
+            qr_enabled = normalized in active_policies and factor != "manual"
+            blocked = normalized in blocked_users
+            access_mode = "blocked" if blocked else "phone" if qr_enabled else "standard"
+            factor = factor if factor in ("native", "key", "password", "key-password") else "native"
+            try:
+                devices = store.devices(normalized)
+                active_count = sum(not device.get("disabled") for device in devices)
+            except (OSError, KeyError, ValueError):
+                devices, active_count = [], 0
+            user_fallback = grants.ssh_fallback_unenrolled(normalized)
+            fallback_override = grants.ssh_fallback_user_override(normalized)
+            fallback_profile = "inherit" if fallback_override is None else "on" if fallback_override else "off"
+            if blocked:
+                device_note = "Effective now: new SSH logins are blocked, regardless of key, password, or phone."
+            elif access_mode == "standard":
+                device_note = "Effective now: standard OpenSSH authentication; no Thessley phone approval is requested."
+            elif active_count:
+                device_note = ("Effective now: the selected OpenSSH credential is checked first, then phone approval. "
+                               "A valid approval pass may skip the QR prompt.")
+            elif devices:
+                device_note = ("No active phone: all enrolled devices are disabled. Login is refused after the first credential; "
+                               "the first-enrollment fallback does not apply.")
+            elif user_fallback:
+                device_note = ("No phone is enrolled. This account's setup fallback is ON, so the selected OpenSSH credential currently allows login "
+                               "without a QR. Enroll a phone to require approval.")
+            else:
+                device_note = ("No phone is enrolled and this account's setup fallback is OFF, so SSH login is refused until enrollment.")
+            if custom_match:
+                device_note += " A custom Match User rule exists; its current OpenSSH credentials are preserved."
+            device_note += f" <a href='/keys?user={esc(username)}'>Manage or enroll {esc(username)}'s phone</a>."
+            mode_options = "".join(
+                f"<option value='{value}'{' selected' if access_mode == value else ''}>{label}</option>"
+                for value, label in (("phone", "Require phone approval"), ("standard", "Standard SSH, no phone approval"),
+                                     ("blocked", "Block SSH")))
+            factor_options = "".join(
+                f"<option value='{value}'{' selected' if factor == value else ''}>{label}</option>"
+                for value, label in (("native", "Current OpenSSH credential"), ("key", "SSH key"),
+                                     ("password", "Account password"), ("key-password", "SSH key and account password")))
             rows.append(
-                "<form method='post' action='/admin/set' class='card ssh-policy-row'>" + hidden +
+                "<div class='card ssh-policy-row'>"
+                "<form method='post' action='/admin/set'>" + hidden +
                 "<input type='hidden' name='name' value='ssh_policy'>" +
                 f"<input type='hidden' name='user' value='{esc(username)}'>" +
-                f"<label><input type='checkbox' name='enabled' value='on'{qr_checked}> Require QR approval</label> "
-                f"<label><input type='checkbox' name='blocked' value='on'{blocked_checked}> Block SSH for <strong>{esc(username)}</strong></label> "
-                "<label>First factor <select name='factor'>" + "".join(
-                    f"<option value='{value}'{' selected' if factor == value else ''}>{label}</option>"
-                    for value, label in (("native", "Current OpenSSH settings"), ("key", "SSH key"), ("password", "Account password"),
-                                         ("key-password", "SSH key and account password"))) +
-                f"</select></label> <button>Save</button><div class='dim'>{device_note}</div></form>"
+                f"<strong>{esc(username)}</strong>"
+                f"<label>SSH access <select name='access_mode'>{mode_options}</select></label> "
+                f"<label>First credential before phone approval <select name='factor'>{factor_options}</select></label> "
+                "<div class='dim'>The credential choice is used only when phone approval is selected. Standard SSH uses the account’s existing OpenSSH methods; blocking denies new logins with every method.</div>"
+                f"<div class='dim'>{device_note}</div><button>Save access</button></form>"
+                "<form method='post' action='/admin/set'>" + hidden +
+                "<input type='hidden' name='name' value='ssh_user_fallback'>" +
+                f"<input type='hidden' name='user' value='{esc(username)}'>" +
+                f"<label>Before this account enrolls its first phone <select name='value'>"
+                f"<option value='inherit'{ ' selected' if fallback_profile == 'inherit' else ''}>Use computer-wide default ({'allow normal SSH' if fallback else 'refuse SSH'})</option>"
+                f"<option value='on'{ ' selected' if fallback_profile == 'on' else ''}>Allow normal SSH until enrollment</option>"
+                f"<option value='off'{ ' selected' if fallback_profile == 'off' else ''}>Refuse SSH until enrollment</option>"
+                f"</select></label><div class='dim'>This is per-account. It applies only when no phone has ever been enrolled; disabled phones never use this fallback.</div>"
+                f"<button>Save first-phone behavior</button></form></div>"
             )
         if rows:
-            ssh_accounts_html = ("<section class='user-section'><h3>Users</h3><p class='dim'>QR approval is the default. "
-                                "The first factor dropdown selects the existing OpenSSH method or an explicit key/password requirement. "
-                                "Domain accounts are not listed. You can block each local account independently.</p>" +
+            ssh_accounts_html = ("<section class='user-section'><h3>Users</h3><p class='dim'>Choose one SSH access mode per local account. "
+                                "Phone approval runs after the selected credential. If no phone has ever been enrolled, the fallback above controls whether normal SSH is allowed. "
+                                "A disabled enrolled phone does not trigger that fallback. Domain accounts are not listed.</p>" +
                                 "".join(rows) + "</section>")
         else:
             ssh_accounts_html = "<p class='dim'>No supported enabled local accounts were found.</p>"
@@ -1184,7 +1393,7 @@ def admin_page(viewer: Session, flash: str, listener_host: str = "") -> str:
         ssh_accounts_html = f"<p class='bad'>Could not read local SSH accounts: {esc(str(exc))}</p>"
     return (flash_html(flash) + "<h2>Settings for this computer</h2>"
             "<p class='dim'>Only administrators see this page. Every change asks your device for a fresh approval.</p>"
-            + source_policy + ssh_help + ssh_accounts_html + ssh_fallback + limits + logging + local_only + grace + toggle + f"<p class='dim'>Passes held right now: {esc(len(grants.all_passes()))}.</p>")
+            + rollback + source_policy + ssh_help + ssh_accounts_html + ssh_fallback + limits + logging + updates + pass_retention + local_only + grace + toggle + f"<p class='dim'>Passes held right now: {esc(len(grants.all_passes()))}.</p>")
 
 
 # ---- HTTP ------------------------------------------------------------------------------------------------------
@@ -1508,21 +1717,56 @@ def make_handler(app: WebApp):
         def admin_action(self, data: dict, s: Session) -> None:
             name, value = data.get("name", ""), (data.get("value") or "").strip()
             details = {}
+            if name == "confirm_setup":
+                if value != "yes":
+                    return self.html(400, "Not valid", flash_html("Confirm the setup before cancelling its rollback timer."), s)
+                pending = setup_rollback_tasks(refresh=True)
+                if pending is None:
+                    return self.html(503, "Unavailable", flash_html("Could not check Task Scheduler. Refresh the Admin page and try again."), s)
+                if not pending:
+                    s.flash = "No pending Thessley setup rollback timer was found."
+                    return self.redirect("/admin")
+                return self.start_change(s, "confirming this Windows setup and cancelling its rollback timer",
+                                         app.change_setting(name, value))
             if name == "ssh_policy":
                 target, factor = (data.get("user") or "").strip(), (data.get("factor") or "native").strip()
                 try:
                     target_key = store.normalize_user(target)
-                    known = {store.normalize_user(row["name"]) for row in ssh_policy.local_accounts()}
+                    known = {store.normalize_user(row["name"]) for row in ssh_policy.local_accounts(refresh=True)}
                 except (ValueError, RuntimeError, OSError):
                     return self.html(400, "Not valid", flash_html("Could not verify that local Windows account."), s)
                 if target_key not in known:
                     return self.html(400, "Not valid", flash_html("Choose an enabled local Windows account from this page."), s)
                 if factor not in ("native", "key", "password", "key-password"):
                     return self.html(400, "Not valid", flash_html("Choose the current OpenSSH settings, an SSH key, account password, or both."), s)
-                enabled = data.get("enabled") == "on"
-                blocked = data.get("blocked") == "on"
+                access_mode = data.get("access_mode")
+                if access_mode is not None:
+                    if access_mode not in ("phone", "standard", "blocked"):
+                        return self.html(400, "Not valid", flash_html("Choose phone approval, standard SSH, or block SSH."), s)
+                    enabled = access_mode == "phone"
+                    blocked = access_mode == "blocked"
+                    if not enabled:
+                        factor = "native"
+                else:  # Accept already-open admin forms from earlier versions.
+                    enabled = data.get("enabled") == "on"
+                    blocked = data.get("blocked") == "on"
                 description = f"updating SSH access for account {target_key}"
                 return self.start_change(s, description, app.change_ssh_access(target_key, enabled, blocked, factor))
+            if name == "ssh_user_fallback":
+                target = (data.get("user") or "").strip()
+                profile = (data.get("value") or "").strip()
+                try:
+                    target_key = store.normalize_user(target)
+                    known = {store.normalize_user(row["name"]) for row in ssh_policy.local_accounts(refresh=True)}
+                except (ValueError, RuntimeError, OSError):
+                    return self.html(400, "Not valid", flash_html("Could not verify that local Windows account."), s)
+                if target_key not in known:
+                    return self.html(400, "Not valid", flash_html("Choose an enabled local Windows account from this page."), s)
+                if profile not in ("inherit", "on", "off"):
+                    return self.html(400, "Not valid", flash_html("Choose the computer-wide default, allow normal SSH, or refuse SSH until enrollment."), s)
+                enabled = None if profile == "inherit" else profile == "on"
+                description = f"updating first-phone SSH behavior for account {target_key}"
+                return self.start_change(s, description, app.change_ssh_user_fallback(target_key, enabled))
             if name == "ssh_source_policy":
                 if data.get("all") == "on":
                     if any(data.get(option) == "on" for option in ("local", "vpn", "custom")):
@@ -1570,7 +1814,7 @@ def make_handler(app: WebApp):
                 if not valid:
                     return self.html(400, "Not valid", flash_html("Check the resource or rotation values."), s)
                 value = f"{first},{second}"
-            elif name in ("self_enroll", "ssh_fallback_unenrolled"):
+            elif name in ("self_enroll", "ssh_fallback_unenrolled", "auto_updates", "preserve_passes_restart"):
                 if value not in ("on", "off"):
                     return self.html(400, "Not valid", flash_html("Choose on or off."), s)
             elif name == "localhost_only":

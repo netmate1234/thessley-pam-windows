@@ -56,6 +56,7 @@ def main() -> None:
     )
 
     service_files = [ROOT / "requirements.lock", ROOT / "guided-install.ps1", ROOT / "install" / "install.ps1",
+                     ROOT / "install" / "update.ps1",
                      ROOT / "install" / "uninstall.ps1", ROOT / "install" / "enable-ssh-qr.ps1",
                      ROOT / "install" / "confirm-setup.ps1", ROOT / "install" / "setup-logon-provider.ps1"]
     service_files += files_under(ROOT / "thessley_pam_win", {".py", ".pem"})
@@ -68,9 +69,13 @@ def main() -> None:
         "This package installs the Thessley QR approval service for Windows OpenSSH and its HTTPS admin web GUI.\n"
         "Read docs/SSH.md and docs/WEB.md before installing. Requires Windows 11, administrator PowerShell, and\n"
         "Python 3.12+ installed for all users under Program Files. The guided installer can optionally configure\n"
-        "the HTTPS admin page, where administrators manage per-account SSH QR requirements, first factors, and allowed source networks.\n"
+        "the HTTPS admin page, where administrators manage per-account SSH QR requirements, first factors, allowed source networks, and scheduled updates.\n"
         "The default firewall scope is local networks plus VPN client subnets 10.8.0.0/24 and 10.8.1.0/24 for SSH, phone approvals, and the web page. In the guided installer, Y/Enter accepts these VPN ranges, N skips them, or enter custom CIDRs.\n"
-        "or configure cloud mode for changing public client IPs (TCP 22/47810, optionally 47820). Cloud-provider firewall rules are separate.\n"
+        "On multi-adapter PCs, the guided installer asks which IPv4 adapter the phone can reach and keeps using that adapter if its DHCP address changes.\n"
+        "Weekly automatic updates run Sunday at 03:00 local time by default and can be switched off in Admin > Settings.\n"
+        "They verify the package hash and reuse the installer's rollback; SSH policy and firewall rules are preserved.\n"
+        "For cloud mode with changing public client IPs, choose the cloud option in the installer (TCP 22/47810, optionally 47820).\n"
+        "Cloud-provider firewall rules are configured separately.\n"
         "install or update the experimental\n"
         "Windows QR sign-in tile with its own rollback. Both are opt-in; retain an SSH session and PIN/password\n"
         "recovery until tested. Other Windows helper app bundles are included in downloads/.\n",
@@ -99,7 +104,8 @@ def main() -> None:
         encoding="utf-8",
     )
     sums = []
-    for package in sorted(RELEASE_OUT.glob("*.zip")):
+    checksum_files = sorted(RELEASE_OUT.glob("*.zip")) + [RELEASE_OUT / "install.ps1"]
+    for package in checksum_files:
         digest = hashlib.sha256(package.read_bytes()).hexdigest()
         sums.append(f"{digest}  {package.name}")
     (RELEASE_OUT / "SHA256SUMS.txt").write_text("\n".join(sums) + "\n", encoding="ascii")

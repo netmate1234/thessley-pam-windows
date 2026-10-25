@@ -12,6 +12,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -60,15 +61,34 @@ def _paths() -> tuple[Path, Path]:
     return config, sshd
 
 
-def local_accounts() -> list[dict[str, str]]:
-    """Return enabled, interactive-ish local accounts supported by the QR protocol."""
-    script = ("Get-CimInstance Win32_UserAccount -Filter 'LocalAccount=True AND Disabled=False' | "
-              "Where-Object { $_.SID -notmatch '-(501|503|504)$' } | "
-              "Select-Object Name,SID | ConvertTo-Json -Compress")
-    result = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
-                            capture_output=True, text=True, timeout=20)
-    if result.returncode:
-        raise RuntimeError("Could not list local Windows accounts.")
+_LOCAL_ACCOUNTS_CACHE: list[dict[str, str]] | None = None
+_LOCAL_ACCOUNTS_AT = 0.0
+_LOCAL_ACCOUNTS_LOCK = threading.Lock()
+_LOCAL_ACCOUNTS_REFRESHING = False
+
+
+def _fetch_local_accounts() -> list[dict[str, str]]:
+    """Query Windows and replace the local-account cache."""
+    global _LOCAL_ACCOUNTS_CACHE, _LOCAL_ACCOUNTS_AT
+    script = ("Get-LocalUser | Where-Object { $_.Enabled -and $_.SID.Value -notmatch '-(501|503|504)$' } | "
+              "Select-Object Name,@{Name='SID';Expression={$_.SID.Value}} | ConvertTo-Json -Compress")
+    try:
+        result = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+                                capture_output=True, text=True, errors="replace", timeout=12)
+    except (OSError, subprocess.SubprocessError):
+        result = None
+    if result is None or result.returncode:
+        # Older PowerShell builds may not expose Get-LocalUser; retain the WMI fallback.
+        fallback = ("Get-CimInstance Win32_UserAccount -Filter 'LocalAccount=True AND Disabled=False' | "
+                    "Where-Object { $_.SID -notmatch '-(501|503|504)$' } | "
+                    "Select-Object Name,SID | ConvertTo-Json -Compress")
+        try:
+            result = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", fallback],
+                                    capture_output=True, text=True, errors="replace", timeout=20)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise RuntimeError("Could not list local Windows accounts.") from exc
+        if result.returncode:
+            raise RuntimeError("Could not list local Windows accounts.")
     import json
     raw = json.loads(result.stdout or "[]")
     if isinstance(raw, dict):
@@ -78,7 +98,34 @@ def local_accounts() -> list[dict[str, str]]:
         name = str(item.get("Name", ""))
         if _NAME.fullmatch(name):
             accounts.append({"name": name, "sid": str(item.get("SID", ""))})
-    return sorted(accounts, key=lambda x: x["name"].casefold())
+    accounts = sorted(accounts, key=lambda x: x["name"].casefold())
+    with _LOCAL_ACCOUNTS_LOCK:
+        _LOCAL_ACCOUNTS_CACHE, _LOCAL_ACCOUNTS_AT = accounts, time.monotonic()
+    return [dict(row) for row in accounts]
+
+
+def _refresh_local_accounts_background() -> None:
+    global _LOCAL_ACCOUNTS_REFRESHING
+    try:
+        _fetch_local_accounts()
+    except Exception:
+        pass  # Keep showing the last known list; a failed refresh must not slow or break Admin.
+    finally:
+        with _LOCAL_ACCOUNTS_LOCK:
+            _LOCAL_ACCOUNTS_REFRESHING = False
+
+
+def local_accounts(refresh: bool = False) -> list[dict[str, str]]:
+    """Return enabled local accounts; refresh stale cached data in the background."""
+    global _LOCAL_ACCOUNTS_REFRESHING
+    with _LOCAL_ACCOUNTS_LOCK:
+        cached = _LOCAL_ACCOUNTS_CACHE
+        if not refresh and cached is not None:
+            if time.monotonic() - _LOCAL_ACCOUNTS_AT >= 60 and not _LOCAL_ACCOUNTS_REFRESHING:
+                _LOCAL_ACCOUNTS_REFRESHING = True
+                threading.Thread(target=_refresh_local_accounts_background, daemon=True).start()
+            return [dict(row) for row in cached]
+    return _fetch_local_accounts()
 
 
 def policies() -> dict[str, str]:

@@ -1,12 +1,13 @@
 """Passes: after one approval, the same user logging in over ssh from the same address needs no new approval for a
 set number of hours.
 
-    thessley-pam-win grace --hours 4         turn it on (0 = every login asks, the default)
+    thessley-pam-win grace --hours 4         set the pass duration (0 = every login asks)
     thessley-pam-win passes                  who holds a pass right now
     thessley-pam-win end-pass [--user NAME]  end passes at once
 
-A pass is one entry in C:\\ProgramData\\ThessleyPamWin\\grants\\<user>.json (SYSTEM and Administrators only; the service
-empties the folder every time it starts, so a restart ends every pass):
+A pass is one entry in C:\\ProgramData\\ThessleyPamWin\\grants\\<user>.json (SYSTEM and Administrators only). By
+default it survives service restarts and updates; Admin can turn that off. Its fixed expiry, client address, and active-
+approver checks still apply:
 
     rhost        where the login came from (the client's address from SSH_CONNECTION)
     credential   the approver that approved; if it is removed or switched off the pass stops working
@@ -215,18 +216,53 @@ def set_self_enroll_first(on: bool) -> None:
 
 WEB_DEFAULTS = {"enabled": False, "listen": "", "port": 47820, "session_minutes": 15, "cert": "", "key": "",
                 "max_connections": 32, "rate_limit_entries": 4096, "log_max_bytes": 1000000, "log_rotations": 5,
-                "localhost_only": False}
+                "localhost_only": False, "auto_updates_enabled": True, "preserve_passes_on_restart": True}
 
 
-def ssh_fallback_unenrolled() -> bool:
-    """Allow normal SSH only for accounts that have never enrolled a phone; default on for setup recovery."""
-    return _load_config().get("ssh_fallback_unenrolled", True) is not False
+def ssh_fallback_user_override(username: str) -> bool | None:
+    """Return a per-account unenrolled fallback override, or None to inherit the computer default."""
+    overrides = _load_config().get("ssh_fallback_unenrolled_users", {})
+    if not isinstance(overrides, dict):
+        return None
+    value = overrides.get(store.normalize_user(username))
+    return value if isinstance(value, bool) else None
+
+
+def ssh_fallback_unenrolled(username: str | None = None) -> bool:
+    """Allow normal SSH only before a user's first phone enrollment; default on for setup recovery."""
+    config = _load_config()
+    if username is not None:
+        overrides = config.get("ssh_fallback_unenrolled_users", {})
+        if isinstance(overrides, dict):
+            value = overrides.get(store.normalize_user(username))
+            if isinstance(value, bool):
+                return value
+    return config.get("ssh_fallback_unenrolled", True) is not False
 
 
 def set_ssh_fallback_unenrolled(enabled: bool) -> None:
     store.ensure_dirs()
     data = _load_config()
     data["ssh_fallback_unenrolled"] = bool(enabled)
+    _atomic_write(_config_path(), data, store.BASE)
+
+
+def set_ssh_fallback_user(username: str, enabled: bool | None) -> None:
+    """Set a per-account first-enrollment fallback, or clear it to inherit the computer default."""
+    name = store.normalize_user(username)
+    store.ensure_dirs()
+    data = _load_config()
+    overrides = data.get("ssh_fallback_unenrolled_users", {})
+    if not isinstance(overrides, dict):
+        overrides = {}
+    if enabled is None:
+        overrides.pop(name, None)
+    else:
+        overrides[name] = bool(enabled)
+    if overrides:
+        data["ssh_fallback_unenrolled_users"] = overrides
+    else:
+        data.pop("ssh_fallback_unenrolled_users", None)
     _atomic_write(_config_path(), data, store.BASE)
 
 WEB_BOOTSTRAP_SECONDS = 10 * 60
@@ -237,7 +273,7 @@ def _web_bootstrap_path() -> str:
     return os.path.join(store.BASE, "web-bootstrap.json")
 
 
-def create_web_bootstrap(username: str) -> tuple[str, str, int]:
+def create_web_bootstrap(username: str, replace_active: bool = False) -> tuple[str, str, int]:
     """Create a short-lived, one-use credential that can only start first-device enrollment."""
     username = store.normalize_user(username)
     with _web_bootstrap_lock:
@@ -261,7 +297,7 @@ def create_web_bootstrap(username: str) -> tuple[str, str, int]:
             active_until = current.get("expires_at", 0) if isinstance(current, dict) else 0
             if not isinstance(active_until, (int, float)):
                 raise ValueError("Could not safely check an existing first-phone setup link.")
-            if active_until > time.time():
+            if active_until > time.time() and not replace_active:
                 raise ValueError("A first-phone setup link is already active. Wait for it to expire before creating another.")
         except FileNotFoundError:
             pass
@@ -348,6 +384,8 @@ def web_settings() -> dict:
         out["log_max_bytes"], out["log_rotations"] = WEB_DEFAULTS["log_max_bytes"], WEB_DEFAULTS["log_rotations"]
     out["enabled"] = bool(out["enabled"])
     out["localhost_only"] = bool(out["localhost_only"])
+    out["auto_updates_enabled"] = bool(out["auto_updates_enabled"])
+    out["preserve_passes_on_restart"] = bool(out["preserve_passes_on_restart"])
     return out
 
 
@@ -409,7 +447,7 @@ def _live(items: list[dict], now: float) -> list[dict]:
 
 
 def clear_all() -> None:
-    """Forget every pass (the service does this when it starts)."""
+    """Forget every pass, used when the administrator disables pass retention on restart."""
     shutil.rmtree(_grants_dir(), ignore_errors=True)
 
 

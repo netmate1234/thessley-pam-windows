@@ -21,6 +21,8 @@ tile has its own rollback. Confirm only
 after testing every selected login method with `C:\ProgramData\ThessleyPamWin\confirm-setup.ps1`. Python 3.12+ for all
 users is required; if it is missing, the wizard offers to install Python 3.13 with winget. It detects a missing
 OpenSSH service and stops before changing SSH policy.
+If multiple IPv4 adapters are active, the wizard asks which LAN or VPN address the phone can reach. It remembers the
+selected adapter rather than its current address, so later DHCP changes follow that adapter instead of a VM-only NAT route.
 Under **Admin → Settings**, administrators can select allowed source networks for SSH, phone approvals, and the web page.
 The default is local networks plus VPN client ranges `10.8.0.0/24` and `10.8.1.0/24`; chosen CIDRs can be added.
 For local hosts, the firewall defaults to local networks plus VPN client ranges `10.8.0.0/24` and `10.8.1.0/24`
@@ -34,6 +36,16 @@ swaps them in. If the service or previously enabled web task fails its startup c
 scheduled task definitions. The last working app is kept under `C:\ProgramData\ThessleyPamWin\backups`; user keys,
 passes, web settings and certificates remain outside the app directory. Dependencies are installed beside the app,
 not into machine-wide Python.
+
+Automatic updates are enabled by default. A SYSTEM scheduled task checks every Sunday at 03:00 in the computer's local
+time. It downloads the published HTTPS bootstrap and ZIP, verifies the ZIP SHA-256 against the hash in that bootstrap,
+then runs the same staged installer and health check with firewall changes disabled. The installer retains the prior
+application for recovery. An update briefly restarts the approval service, so new QR-gated SSH logins can pause during
+activation; existing SSH sessions are not terminated. Under **Admin → Settings**, use **Turn automatic updates off**
+to disable the task or turn it back on. The task and status files are `ThessleyPamWinUpdate`,
+`C:\ProgramData\ThessleyPamWin\update-state.json`, and `C:\ProgramData\ThessleyPamWin\logs\update.log`.
+The updater uses the same HTTPS publisher and hash-pinned bootstrap trust as the interactive installer; it does not
+verify a separate code-signing signature.
 
 You can also install over an existing SSH connection. First install and test Windows OpenSSH independently, then connect
 with an interactive PowerShell session and confirm it has an administrator token. Use the hosted one-line bootstrap or

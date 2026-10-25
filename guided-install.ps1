@@ -35,8 +35,85 @@ function Find-MachinePython {
     return $null
 }
 
+function Select-PhoneNetworkInterface {
+    try {
+        $candidates = @(
+            Get-NetIPConfiguration -ErrorAction Stop |
+                Where-Object { $_.NetAdapter.Status -eq 'Up' -and $_.IPv4Address } |
+                ForEach-Object {
+                    $config = $_
+                    $address = @($config.IPv4Address | Where-Object { $_.IPAddress -notmatch '^(127\.|169\.254\.)' } | Select-Object -First 1)
+                    if ($address.Count -gt 0) {
+                        $gateway = @($config.IPv4DefaultGateway | ForEach-Object { $_.NextHop }) -join ', '
+                        [pscustomobject]@{
+                            Index = [int]$config.InterfaceIndex
+                            Alias = [string]$config.InterfaceAlias
+                            Address = [string]$address[0].IPAddress
+                            Gateway = $gateway
+                            Suffix = [string]$config.NetProfile.Name
+                        }
+                    }
+                } |
+                Sort-Object @{ Expression = { if ($_.Suffix) { 0 } else { 1 } } },
+                            @{ Expression = { if ($_.Alias -match '\s+\d+$') { 1 } else { 0 } } }, Alias, Address
+        )
+    } catch {
+        Write-Warning "Could not enumerate IPv4 adapters; Windows will select its default route. $($_.Exception.Message)"
+        return 'auto'
+    }
+
+    if ($candidates.Count -eq 0) {
+        Write-Warning 'No active IPv4 adapter was found; Windows will select its default route.'
+        return 'auto'
+    }
+    if ($candidates.Count -eq 1) {
+        $selected = $candidates[0]
+        Write-Host "Phone links will use $($selected.Address) on $($selected.Alias)."
+        return [string]$selected.Index
+    }
+
+    Write-Host "`nThis PC has multiple active IPv4 adapters. Thessley puts the selected address in phone approval links. Choose an address the phone can reach (your LAN or VPN); do not choose a VM-only NAT address."
+    for ($i = 0; $i -lt $candidates.Count; $i++) {
+        $gateway = ''
+        if ($candidates[$i].Gateway) { $gateway = "; gateway $($candidates[$i].Gateway)" }
+        Write-Host "  $($i + 1). Adapter: $($candidates[$i].Alias); current IPv4 address: $($candidates[$i].Address)$gateway"
+    }
+    Write-Host '  A. Let Windows choose its default route automatically.'
+    while ($true) {
+        $choice = Read-Host 'Number of the phone-reachable adapter [1]'
+        if ([string]::IsNullOrWhiteSpace($choice)) { $choice = '1' }
+        if ($choice -match '^(a|auto)$') {
+            Write-Host "Phone links will follow Windows default route. On a multi-NIC VM, this may be a private NAT address."
+            return 'auto'
+        }
+        if ($choice -match '^\d+$' -and [int]$choice -ge 1 -and [int]$choice -le $candidates.Count) {
+            $selected = $candidates[[int]$choice - 1]
+            Write-Host "Phone links will use $($selected.Address) on $($selected.Alias). The address will follow DHCP changes on this adapter."
+            return [string]$selected.Index
+        }
+        Write-Host "Enter a number from 1 to $($candidates.Count), or A for automatic selection."
+    }
+}
+
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw 'Open PowerShell as Administrator, then run this installer again.'
+}
+
+# Check the SSH prerequisite before installing Python or changing any services.
+# The wizard deliberately does not install or reconfigure OpenSSH itself.
+$sshCapability = Get-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
+$sshInstalled = $sshCapability.State -eq 'Installed'
+$sshdService = Get-Service -Name sshd -ErrorAction SilentlyContinue
+$sshReady = $sshInstalled -and $sshdService -and $sshdService.Status -eq 'Running'
+if (-not $sshReady) {
+    if (-not $sshInstalled) {
+        Write-Warning 'OpenSSH Server is not installed. Thessley SSH QR login cannot work until OpenSSH Server is installed.'
+    } else {
+        Write-Warning 'OpenSSH Server is installed but sshd is not running. Thessley SSH QR login cannot work until sshd is started.'
+    }
+    if (-not (Ask-YesNo 'Continue with web administration and optional Windows sign-in only, without SSH QR login?' $false)) {
+        throw 'No Thessley setup changes were made. Install and start OpenSSH Server, then rerun this wizard.'
+    }
 }
 
 $repo = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -54,9 +131,7 @@ if (-not $python) {
 }
 Write-Host "Using machine-wide Python: $python"
 
-$sshCapability = Get-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
-$sshInstalled = $sshCapability.State -eq 'Installed'
-$sshdService = Get-Service -Name sshd -ErrorAction SilentlyContinue
+$phoneInterfaceIndex = Select-PhoneNetworkInterface
 
 $cloudAccess = Ask-YesNo 'Is this a cloud host whose SSH clients and phone approvals may come from changing public IP addresses? Cloud mode opens selected Windows firewall ports to any remote IP.' $false
 $openSshFirewall = $false
@@ -90,13 +165,13 @@ if (-not $cloudAccess -and ($openApprovalFirewall -or $openWebFirewall -or $sshV
         if ($choice -match '^(n|no|none)$') { break }
 
         if ($choice -match '^(c|custom)$') {
-            $choice = Read-Host 'Enter comma-separated IPv4 VPN subnets in CIDR form (or none to skip)'
+            $choice = Read-Host 'Enter comma-separated IPv4 CIDRs; for one phone source IP shown in its error, add /32 (or type none to skip)'
         }
         if ($choice -ieq 'none') { break }
 
         $subnets = @($choice -split '\s*,\s*')
         if (@($subnets | Where-Object { $_ -notmatch $cidrPattern }).Count -gt 0) {
-            Write-Host 'Choose Y, N, or enter CIDR ranges such as 10.8.0.0/24,10.8.1.0/24.'
+            Write-Host 'Choose Y or N, or enter CIDRs such as 10.8.0.0/24 or a single source such as 10.31.19.228/32.'
             continue
         }
         $vpnClientSubnets = $subnets -join ','
@@ -106,6 +181,7 @@ if (-not $cloudAccess -and ($openApprovalFirewall -or $openWebFirewall -or $sshV
 
 $install = Join-Path $repo 'install\install.ps1'
 $arguments = @{ Python = $python }
+$arguments.PhoneInterfaceIndex = $phoneInterfaceIndex
 if ($openApprovalFirewall) { $arguments.OpenFirewall = $true }
 if ($openWebFirewall) { $arguments.OpenWebFirewall = $true }
 if ($cloudAccess) { $arguments.CloudAccess = $true }
@@ -135,12 +211,38 @@ function Ensure-PhoneApprover([string]$Account) {
             return $false
         }
     }
-    return (Ask-YesNo "Is the enrolled phone available now to test $Account's login?" $false)
+    return (Ask-YesNo "Is the enrolled phone available now to test the $Account login?" $false)
+}
+
+function Invoke-CliCapture([string[]]$Arguments) {
+    # Expected CLI failures (for example, an active one-time link) must be
+    # inspected by the caller instead of becoming terminating PowerShell
+    # NativeCommandError records under $ErrorActionPreference = 'Stop'.
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $lines = @(& $cli @Arguments 2>&1)
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    return [pscustomobject]@{ Lines = $lines; ExitCode = $exitCode }
 }
 
 if ($enableWeb) {
-    & $cli web on
-    if ($LASTEXITCODE -ne 0) { throw 'The web page could not be enabled.' }
+    $webOnResult = Invoke-CliCapture @('web', 'on')
+    if ($webOnResult.ExitCode -ne 0) {
+        foreach ($line in $webOnResult.Lines) { Write-Host $line }
+        throw 'The web page could not be enabled.'
+    }
+    $adminSignInLine = $null
+    foreach ($line in $webOnResult.Lines) {
+        if ([string]$line -match 'https?://') {
+            $adminSignInLine = [string]$line
+        } else {
+            Write-Host $line
+        }
+    }
 
     $bootstrapUser = $env:USERNAME
     $listed = @(& $cli list --user $bootstrapUser 2>&1)
@@ -152,23 +254,41 @@ if ($enableWeb) {
     $enrolled = @($anyDevices | Where-Object { $_ -notmatch '\(disabled\)' })
     if ($anyDevices.Count -eq 0) {
         Write-Host "`nNo phone is enrolled for $bootstrapUser. Creating the one-time first-phone link now."
-        & $cli web bootstrap --user $bootstrapUser
-        if ($LASTEXITCODE -ne 0) { throw 'The one-time first-phone setup link could not be created.' }
-        Write-Host 'Open the complete FIRST-PHONE ENROLLMENT LINK printed above, enter its setup code, and enroll the phone. The link expires after 10 minutes.'
-        $deadline = (Get-Date).AddMinutes(10)
-        while ((Get-Date) -lt $deadline) {
-            Start-Sleep -Seconds 3
-            $listed = @(& $cli list --user $bootstrapUser 2>&1)
-            if ($LASTEXITCODE -ne 0) { throw "Could not check enrollment status for $bootstrapUser." }
-            $enrolled = @($listed | Where-Object { $_ -match '\benrolled\s+\d{4}-\d{2}-\d{2}' -and $_ -notmatch '\(disabled\)' })
-            if ($enrolled.Count -gt 0) {
-                Write-Host "First phone enrolled for $bootstrapUser. The installer can now continue."
-                break
+        $bootstrapResult = Invoke-CliCapture @('web', 'bootstrap', '--user', $bootstrapUser)
+        $bootstrapOutput = @($bootstrapResult.Lines)
+        $bootstrapCreated = $bootstrapResult.ExitCode -eq 0
+        if (-not $bootstrapCreated) {
+            foreach ($line in $bootstrapOutput) { Write-Host $line }
+            $alreadyActive = ($bootstrapOutput -join "`n") -match 'first-phone setup link is already active'
+            if ($alreadyActive -and (Ask-YesNo 'The previous setup link is still active, but its complete URL cannot be recovered. Invalidate it and issue a fresh link now?' $true)) {
+                $bootstrapResult = Invoke-CliCapture @('web', 'bootstrap', '--user', $bootstrapUser, '--replace-active')
+                $bootstrapOutput = @($bootstrapResult.Lines)
+                $bootstrapCreated = $bootstrapResult.ExitCode -eq 0
             }
         }
-        if ($enrolled.Count -eq 0) {
-            Write-Warning 'No phone was enrolled before the one-time setup expired. Rerun the guided installer to generate a fresh link.'
+        if ($bootstrapCreated) {
+            foreach ($line in $bootstrapOutput) { Write-Host $line }
+            Write-Host 'Open the complete FIRST-PHONE ENROLLMENT LINK printed above, enter its setup code, and enroll the phone. The link expires after 10 minutes.'
+            $enrollmentTimer = [Diagnostics.Stopwatch]::StartNew()
+            while ($enrollmentTimer.Elapsed.TotalMinutes -lt 10) {
+                Start-Sleep -Seconds 3
+                $listed = @(& $cli list --user $bootstrapUser 2>&1)
+                if ($LASTEXITCODE -ne 0) { Write-Warning "Could not check enrollment status for $bootstrapUser. The service remains installed."; break }
+                $enrolled = @($listed | Where-Object { $_ -match '\benrolled\s+\d{4}-\d{2}-\d{2}' -and $_ -notmatch '\(disabled\)' })
+                if ($enrolled.Count -gt 0) {
+                    Write-Host "First phone enrolled for $bootstrapUser. The installer can now continue."
+                    break
+                }
+            }
+            if ($enrolled.Count -eq 0) {
+                Write-Warning 'No phone was enrolled before the one-time setup expired. The service and web page remain installed; rerun the guided installer to create a fresh link.'
+            }
+        } else {
+            foreach ($line in $bootstrapOutput) { Write-Host $line }
+            Write-Warning 'The service and web page remain installed, but phone enrollment was not started. Rerun the guided installer to try again.'
         }
+    } elseif ($adminSignInLine) {
+        Write-Host $adminSignInLine
     }
 }
 
@@ -216,11 +336,12 @@ Write-Host "& `"$cli`" enroll --user YOURNAME"
 if ($sshConfigured -or $providerConfigured) {
     Write-Host "`nDo not confirm until every enabled method has been tested successfully."
     Write-Host 'After successful SSH QR login and/or Windows QR sign-in, run elevated:'
-    Write-Host "  powershell -ExecutionPolicy Bypass -File `"$(Join-Path $env:ProgramData 'ThessleyPamWin\confirm-setup.ps1')`""
+    $confirmScript = Join-Path $env:ProgramData 'ThessleyPamWin\confirm-setup.ps1'
+    Write-Host "  powershell -ExecutionPolicy Bypass -File `"$confirmScript`""
     if ($sshConfigured) { Write-Host 'SSH config changes are validated and backed up in C:\ProgramData\ThessleyPamWin\backups; QR can be turned off per account in Admin.' }
     if ($providerConfigured) { Write-Host 'The Windows QR sign-in tile has its own automatic rollback timer.' }
     Write-Host 'The built-in Windows PIN/password tiles remain available as recovery.'
 } else {
     Write-Host 'No SSH policy or Windows sign-in provider changes were made. Configure per-user SSH access from the Admin page after setup.'
 }
-Write-Host 'To uninstall the approval service, remove any active SSH Match User block first, then run install\uninstall.ps1 as Administrator.'
+Write-Host "To uninstall the approval service, remove any active SSH Match User block first, then run install\uninstall.ps1 as Administrator."
