@@ -70,22 +70,19 @@ try {
 }
 '@
     Set-Content -LiteralPath $rollbackScript -Value $rollbackBody -Encoding ascii
-    # Schedule recovery before replacing either installed file.
-    $powerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    $action = New-ScheduledTaskAction -Execute $powerShell -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$rollbackScript`""
-    $deadlineUtc = [DateTimeOffset]::UtcNow.AddMinutes($RollbackMinutes)
-    $trigger = New-ScheduledTaskTrigger -Once -At $deadlineUtc.LocalDateTime
-    $trigger.StartBoundary = $deadlineUtc.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", [Globalization.CultureInfo]::InvariantCulture)
-    $runAsSystem = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-    $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-    Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $runAsSystem -Settings $settings -Description 'Restores the previous Thessley sign-in files unless the branding update is confirmed.' | Out-Null
+    # Verify the future SYSTEM rollback before replacing either installed file.
+    $rollback = & (Join-Path $PSScriptRoot 'register-verified-rollback.ps1') `
+        -TaskName $taskName -RollbackFile $rollbackScript -RollbackMinutes $RollbackMinutes
+    $deadlineLocal = ([DateTime]$rollback.DeadlineLocal).ToString('yyyy-MM-dd HH:mm:ss zzz')
+    $deadlineUniversal = ([DateTime]$rollback.DeadlineUtc).ToString('yyyy-MM-dd HH:mm:ss')
 
     try {
         if ($dllChanged) { Copy-Item -LiteralPath $dllSource -Destination $newDllPath -Force }
         Copy-Item -LiteralPath $viewerSource -Destination $viewerPath -Force
         if ($dllChanged) { $inproc.SetValue('', $newDllPath, [Microsoft.Win32.RegistryValueKind]::String) }
     } catch {
-        & $powerShell -NoProfile -ExecutionPolicy Bypass -File $rollbackScript
+        & (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') `
+            -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $rollbackScript
         throw
     }
 } finally {
@@ -93,9 +90,7 @@ try {
     $base.Dispose()
 }
 
-$deadlineLocal = $deadlineUtc.ToLocalTime().ToString('yyyy-MM-dd HH:mm:ss zzz')
-$deadlineUniversal = $deadlineUtc.UtcDateTime.ToString('yyyy-MM-dd HH:mm:ss')
-Write-Host "Thessley sign-in files installed. Automatic restore deadline: $deadlineLocal local / $deadlineUniversal UTC."
+Write-Host "Verified rollback timer is active. Thessley sign-in files installed. Automatic restore deadline: $deadlineLocal local / $deadlineUniversal UTC."
 Write-Host 'Test a QR sign-in, then run elevated before the deadline:'
 Write-Host "  powershell -ExecutionPolicy Bypass -File `"$(Join-Path $installDir 'confirm.ps1')`""
 Write-Host 'If not confirmed, the prior provider DLL and QR viewer are restored automatically.'

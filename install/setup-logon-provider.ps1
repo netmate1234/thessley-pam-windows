@@ -21,10 +21,43 @@ try {
     $registered = Test-Path "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\$providerId"
     if ($registered) {
         & $update -RollbackMinutes $RollbackMinutes
+        $rollbackTarget = Join-Path $env:ProgramData 'ThessleyPamWin\credential-provider\branding-rollback.ps1'
     } else {
         & $firstInstall -RollbackMinutes $RollbackMinutes
+        $rollbackTarget = Join-Path $env:ProgramData 'ThessleyPamWin\credential-provider\rollback.ps1'
     }
-    if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw 'The Windows sign-in provider installer reported a failure.' }
+
+    # The provider package performs its own verification before touching the
+    # sign-in files. Check again at the guided-installer boundary so a package
+    # regression cannot be reported as a successful setup with no live timer.
+    $taskName = 'ThessleyCredentialProviderRollback'
+    $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+    $taskInfo = $null
+    if ($task) { $taskInfo = Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction SilentlyContinue }
+    $nextRun = if ($taskInfo) { [DateTime]$taskInfo.NextRunTime } else { [DateTime]::MinValue }
+    $hasRollbackAction = $false
+    if ($task) {
+        $hasRollbackAction = (@($task.Actions | Where-Object {
+            $_.Arguments -like '*ThessleyPamWin\credential-provider\*rollback.ps1*'
+        }).Count -gt 0)
+    }
+    if (-not $task -or $task.State -eq 'Disabled' -or -not $hasRollbackAction `
+        -or $nextRun -le [DateTime]::Now.AddMinutes(1) `
+        -or $nextRun -gt [DateTime]::Now.AddMinutes($RollbackMinutes + 2)) {
+        $rollbackSucceeded = $false
+        if (Test-Path -LiteralPath $rollbackTarget -PathType Leaf) {
+            $powerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+            & $powerShell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $rollbackTarget
+            $rollbackSucceeded = ($LASTEXITCODE -eq 0)
+        }
+        if (-not $rollbackSucceeded) {
+            throw "The sign-in rollback timer is invalid, and automatic recovery did not complete. Run this recovery script elevated immediately: $rollbackTarget"
+        }
+        throw 'The sign-in rollback timer was missing, disabled, or not scheduled in the future. The provider was rolled back and setup was stopped.'
+    }
+    $deadlineLocal = $nextRun.ToString('yyyy-MM-dd HH:mm:ss zzz')
+    $deadlineUtc = ([DateTimeOffset]$nextRun).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss')
+    Write-Host "Verified Windows sign-in rollback task: $taskName; deadline $deadlineLocal local / $deadlineUtc UTC."
     Write-Host 'Keep the built-in PIN/password tiles available. Test Thessley at the sign-in screen before confirming setup.'
     Write-Host "After all tests succeed, run: powershell -ExecutionPolicy Bypass -File `"$(Join-Path $env:ProgramData 'ThessleyPamWin\confirm-setup.ps1')`""
 } finally {
