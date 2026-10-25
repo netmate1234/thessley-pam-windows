@@ -119,14 +119,17 @@ def setup_rollback_tasks(refresh: bool = False) -> list[str] | None:
     global _ROLLBACK_CACHE, _ROLLBACK_REFRESHING
     with _ROLLBACK_CACHE_LOCK:
         cached_at, cached = _ROLLBACK_CACHE
-        # A failed Task Scheduler query must not leave the Admin page showing
-        # an unavailable warning for a full cache interval.
-        ttl = 60 if cached is not None else 5
+        # Rollback tasks can be created or expire outside this service process.
+        # Keep an empty result very briefly, and never present any expired
+        # scheduler snapshot as current state while its background refresh runs.
+        ttl = 2 if cached == [] else (10 if cached is not None else 2)
         expired = time.monotonic() - cached_at >= ttl
         if not refresh and cached_at > 0:
             if expired and not _ROLLBACK_REFRESHING:
                 _ROLLBACK_REFRESHING = True
                 threading.Thread(target=_refresh_setup_rollback_background, daemon=True).start()
+            if expired:
+                return None
             return list(cached) if cached is not None else None
     return _fetch_setup_rollback_tasks()
 
