@@ -307,22 +307,31 @@ class Handler(socketserver.StreamRequestHandler):
             if not self._send({"say": line}):
                 cancel.set()
 
-        # Credential Providers can briefly supply the account name before the
-        # SID is populated (for example during a cold LogonUI enumeration).
-        # For a local account, resolve that exact machine-local name back to
-        # its SID and use the enrolled SID-bound Drupal key when available.
-        # Never apply this inference to domain accounts or accept a mismatch
-        # when the provider did supply a SID.
-        if not sid and scope == "local":
+        # Windows SIDs are case-insensitive. Canonicalize before deriving the
+        # SID-scoped filename/hash, which is case-sensitive at the byte level.
+        if sid:
+            sid = sid.strip().upper()
+
+        # For local sign-in, Windows' local account database is authoritative.
+        # Resolve the selected local name back to its SID so a stale or
+        # differently-cased SID from LogonUI cannot send an enrolled account
+        # through the ambiguous legacy username-key route. Never infer a SID
+        # this way for domain accounts.
+        if scope == "local" or (not sid and scope != "domain"):
             try:
                 resolved_sid = drupal_agent._account_sid(user)
             except drupal_agent.AgentError:
                 resolved_sid = ""
             if resolved_sid and drupal_agent.configured_sid(resolved_sid):
+                if sid and sid.casefold() != resolved_sid.casefold():
+                    log(f"Windows provider SID did not match the local account SID for {user!r}; using the exact local SID.", True)
                 sid = resolved_sid
                 log(f"Resolved local Windows login for {user!r} to its enrolled SID-bound Drupal key.")
 
         if sid and drupal_agent.configured_sid(sid):
+            if not context:
+                context = "interactive"
+                log(f"Windows login context was omitted for {user!r}; using interactive sign-in.")
             try:
                 return drupal_agent.run_login_v2(sid, context, say, cancel, log)
             except drupal_agent.AgentError as exc:
