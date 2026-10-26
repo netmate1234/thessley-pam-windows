@@ -495,9 +495,17 @@ def main() -> int:
     approve.set_shared_listener(shared)
     server = Server()
     log(f"service started on {HOST}:{server.server_address[1]} and HTTPS approval listener {ip}:47810")
+    drupal_sync_stop = threading.Event()
+    threading.Thread(
+        target=drupal_agent.sync_loop,
+        args=(drupal_sync_stop, log),
+        name="ThessleyDrupalPolicySync",
+        daemon=True,
+    ).start()
     try:
         server.serve_forever()
     finally:
+        drupal_sync_stop.set()
         server.server_close()
         shared.close()
     return 0

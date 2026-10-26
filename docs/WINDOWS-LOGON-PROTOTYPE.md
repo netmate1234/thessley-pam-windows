@@ -31,19 +31,33 @@ approval service. To prepare the account, open an elevated PowerShell and run:
 
 The command creates a software ECDSA P-256 key and prints the machine ID,
 computer name, account SID hash, public key, and server details. Enter those
-values in **Drupal Admin → Thessley Windows Access → Enroll Windows account**,
-link the binding to the intended Drupal user, grant that Drupal role only
-**Windows sign-in** on the test computer, and scan the resulting enrollment
-QR with the phone. The phone receives the account in **Computers**. The
+values in **Drupal Admin → Windows Access → Enroll account**, link the binding
+to the intended Drupal user, grant that Drupal role **Windows sign-in** on the
+test computer, and scan the resulting enrollment QR with the phone. The phone receives the account in **Computers**. The
 machine and phone must be able to reach the HTTPS origin in the generated
 link. The exact leaf-certificate SHA-256 fingerprint is pinned before
 Windows sends any signed request, and HTTP redirects are refused. Update the
 pin deliberately whenever the server certificate is renewed.
 
+The same Drupal user can be linked to a local account named `admin` on many
+computers. The local `admin` account must already exist on each PC; each
+machine has a distinct SID and agent key, and the phone is enrolled separately
+for each machine/account binding. Assign the Drupal user to the
+`Windows Administrators` role and grant its role the `all_windows` sign-in and
+local-administrator actions to apply the policy across enrolled PCs.
+
 After enrollment, the next use of the Thessley lock-screen tile obtains its
 phone request from Drupal, shows the Drupal PAM link as a QR, and polls the
 signed status endpoint. A revoked phone or removed Drupal grant denies the
 attempt. Other accounts continue to use the existing local approval flow.
+The SYSTEM service also syncs Drupal policy and direct Windows local-group
+inventory immediately after service start and every 15 minutes. A
+`windows.local_admin` grant adds the mapped account to local Administrators;
+the service records that it added the member and removes only that membership
+after revocation. It preserves membership that existed before Thessley managed
+the account. Group inventory appears in the Drupal account page after a
+successful sync. This service sync is separate from the credential-provider
+rollback timer; leave the tile rollback armed until a real sign-in succeeds.
 This prototype key is protected by SYSTEM/Administrators ACLs, but is not
 TPM-backed. It still gates the existing saved-password credential provider;
 it does not make Windows sign-in passwordless. Keep PIN/password recovery
