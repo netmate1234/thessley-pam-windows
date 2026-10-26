@@ -52,11 +52,14 @@ signed status endpoint. A revoked phone or removed Drupal grant denies the
 attempt. Other accounts continue to use the existing local approval flow.
 The SYSTEM service also syncs Drupal policy and direct Windows local-group
 inventory immediately after service start and every 15 minutes. A
-`windows.local_admin` grant adds the mapped account to local Administrators;
-the service records that it added the member and removes only that membership
-after revocation. It preserves membership that existed before Thessley managed
-the account. Group inventory appears in the Drupal account page after a
-successful sync. This service sync is separate from the credential-provider
+`windows.local_admin`, `windows.remote_desktop`,
+`windows.event_log_readers`, and `windows.remote_management` grants reconcile
+membership in Administrators, Remote Desktop Users, Event Log Readers, and
+Remote Management Users. The service records only memberships it added and
+removes only those memberships after revocation; pre-existing membership is
+preserved. Remote Management Users allows remote administration and should be
+granted only to trusted users. Group inventory appears in the Drupal account
+page after a successful sync. This service sync is separate from the credential-provider
 rollback timer; leave the tile rollback armed until a real sign-in succeeds.
 This prototype key is protected by SYSTEM/Administrators ACLs, but is not
 TPM-backed. It still gates the existing saved-password credential provider;

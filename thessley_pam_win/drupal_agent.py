@@ -30,6 +30,18 @@ from . import machine, store
 SIG_VERSION = "thessley_win_agent_v1"
 USER_RE = re.compile(r"^[a-z_][a-z0-9_.-]{0,31}$")
 WINDOWS_ADMINISTRATORS_SID = "S-1-5-32-544"
+WINDOWS_LOCAL_GROUPS = {
+    "Administrators": WINDOWS_ADMINISTRATORS_SID,
+    "Remote Desktop Users": "S-1-5-32-555",
+    "Event Log Readers": "S-1-5-32-573",
+    "Remote Management Users": "S-1-5-32-580",
+}
+WINDOWS_GROUP_ACTIONS = {
+    "windows.local_admin": "Administrators",
+    "windows.remote_desktop": "Remote Desktop Users",
+    "windows.event_log_readers": "Event Log Readers",
+    "windows.remote_management": "Remote Management Users",
+}
 MAX_INVENTORY_BYTES = 18000
 
 
@@ -344,7 +356,7 @@ def _post_policy(config: dict, key: ec.EllipticCurvePrivateKey) -> dict:
     return _post(url, {"timestamp": timestamp, "signature": signature}, config["tls_sha256"])
 
 
-def _validated_policy(response: dict) -> tuple[list[str], list[str], bool]:
+def _validated_policy(response: dict) -> tuple[list[str], list[str], list[str], bool]:
     if response.get("result") != "ok":
         raise AgentError(str(response.get("message") or "Drupal did not return the current account policy."))
     active = response.get("identity_active")
@@ -359,28 +371,32 @@ def _validated_policy(response: dict) -> tuple[list[str], list[str], bool]:
                 or not re.fullmatch(r"[a-z0-9_]{1,64}", role["id"])
                 or not isinstance(role.get("label"), str) or len(role["label"]) > 128):
             raise AgentError("Drupal returned an invalid group in the account policy.")
-    if any(action not in ("windows.login", "windows.local_admin") for action in actions):
+    if any(action not in ("windows.login", *WINDOWS_GROUP_ACTIONS) for action in actions):
         raise AgentError("Drupal returned an unsupported Windows action.")
     if len(set(actions)) != len(actions):
         raise AgentError("Drupal returned duplicate Windows actions.")
-    if any(group != "Administrators" for group in managed) or len(set(managed)) != len(managed):
+    if any(group not in WINDOWS_LOCAL_GROUPS for group in managed) or len(set(managed)) != len(managed):
         raise AgentError("Drupal requested an unsupported local Windows group.")
     if not active and (roles or actions or managed):
         raise AgentError("Drupal returned permissions for an inactive identity.")
-    if ("Administrators" in managed) != ("windows.local_admin" in actions):
-        raise AgentError("Drupal returned inconsistent local administrator policy.")
-    return [role["id"] for role in roles], actions, active and "Administrators" in managed
+    expected = [group for action, group in WINDOWS_GROUP_ACTIONS.items() if action in actions]
+    if set(managed) != set(expected):
+        raise AgentError("Drupal returned inconsistent local Windows group policy.")
+    return [role["id"] for role in roles], actions, managed, active
 
 
-def _local_admin_membership(username: str, account_sid: str, operation: str) -> dict:
-    """Inspect or change direct membership using stable SIDs, not localized names."""
+def _local_group_membership(group_name: str, username: str, account_sid: str, operation: str) -> dict:
+    """Inspect or change a supported built-in group by stable SID."""
+    group_sid = WINDOWS_LOCAL_GROUPS.get(group_name)
+    if not group_sid:
+        raise AgentError("Drupal requested an unsupported Windows local group.")
     if operation not in ("inspect", "add", "remove"):
         raise ValueError("Invalid local administrator membership operation.")
     if not re.fullmatch(r"S-1-(?:[0-9]+-)+[0-9]+", account_sid):
         raise AgentError("The mapped Windows account has an invalid SID.")
     command = (
         "$ErrorActionPreference='Stop'; "
-        f"$groupSid=New-Object System.Security.Principal.SecurityIdentifier('{WINDOWS_ADMINISTRATORS_SID}'); "
+        f"$groupSid=New-Object System.Security.Principal.SecurityIdentifier('{group_sid}'); "
         f"$accountSid=New-Object System.Security.Principal.SecurityIdentifier('{account_sid}'); "
         "$group=Get-LocalGroup -SID $groupSid -ErrorAction Stop; "
         "$before=[bool](@(Get-LocalGroupMember -SID $groupSid -ErrorAction Stop | Where-Object { $_.SID -and $_.SID.Value -eq $accountSid.Value }).Count); "
@@ -393,18 +409,23 @@ def _local_admin_membership(username: str, account_sid: str, operation: str) -> 
         "$after=[bool](@(Get-LocalGroupMember -SID $groupSid -ErrorAction Stop | Where-Object { $_.SID -and $_.SID.Value -eq $accountSid.Value }).Count); "
         "ConvertTo-Json -InputObject @{before=$before; after=$after} -Compress"
     )
-    output = _powershell(command, "Could not safely reconcile this account's Windows Administrators membership.")
+    output = _powershell(command, f"Could not safely reconcile this account's Windows {group_name} membership.")
     try:
         result = json.loads(output)
     except (json.JSONDecodeError, TypeError) as exc:
-        raise AgentError("Windows returned an invalid administrator-membership result.") from exc
+        raise AgentError(f"Windows returned an invalid {group_name} membership result.") from exc
     if not isinstance(result, dict) or not isinstance(result.get("before"), bool) or not isinstance(result.get("after"), bool):
-        raise AgentError("Windows returned an invalid administrator-membership result.")
+        raise AgentError(f"Windows returned an invalid {group_name} membership result.")
     if operation == "add" and not result["after"]:
-        raise AgentError("Windows did not add the account to Administrators.")
+        raise AgentError(f"Windows did not add the account to {group_name}.")
     if operation == "remove" and result["after"]:
-        raise AgentError("Windows did not remove the Thessley-managed Administrators membership.")
+        raise AgentError(f"Windows did not remove the Thessley-managed {group_name} membership.")
     return result
+
+
+def _local_admin_membership(username: str, account_sid: str, operation: str) -> dict:
+    """Compatibility wrapper for the original administrator-group action."""
+    return _local_group_membership("Administrators", username, account_sid, operation)
 
 
 def _save_managed_group_state(config: dict, added_sids: set[str]) -> None:
@@ -429,58 +450,63 @@ def _save_managed_group_state(config: dict, added_sids: set[str]) -> None:
         raise
 
 
-def _apply_local_admin_policy(username: str, config: dict, desired: bool) -> str:
+def _apply_managed_local_groups(username: str, config: dict, desired_groups: list[str]) -> dict[str, str]:
     added_sids = set(config.get("managed_local_group_sids", []))
-    if any(not isinstance(sid, str) or sid != WINDOWS_ADMINISTRATORS_SID for sid in added_sids):
+    supported_sids = set(WINDOWS_LOCAL_GROUPS.values())
+    if any(not isinstance(sid, str) or sid not in supported_sids for sid in added_sids):
         raise AgentError("The local record of Thessley-managed Windows groups is invalid.")
+    if any(group not in WINDOWS_LOCAL_GROUPS for group in desired_groups):
+        raise AgentError("The Drupal policy contains an unsupported Windows local group.")
     account_sid = _account_sid(username)
-    owned = WINDOWS_ADMINISTRATORS_SID in added_sids
-    action = "unchanged"
+    desired_sids = {WINDOWS_LOCAL_GROUPS[group] for group in desired_groups}
+    changes = {}
 
-    if desired:
-        state = _local_admin_membership(username, account_sid, "inspect")
-        if state["before"]:
-            # Do not claim or later remove membership that predates Thessley.
-            action = "already-member"
-        else:
-            # Record ownership before changing Windows, so a crash cannot
-            # leave an untracked administrative membership behind.
+    for group_name, group_sid in WINDOWS_LOCAL_GROUPS.items():
+        owned = group_sid in added_sids
+        if group_sid in desired_sids:
+            state = _local_group_membership(group_name, username, account_sid, "inspect")
+            if state["before"]:
+                # Do not claim or later remove membership that predates Thessley.
+                changes[group_name] = "already-managed-member" if owned else "already-member"
+                continue
+            # Record ownership before changing Windows, so a crash cannot leave
+            # an untracked membership behind.
             if not owned:
-                added_sids.add(WINDOWS_ADMINISTRATORS_SID)
+                added_sids.add(group_sid)
                 _save_managed_group_state(config, added_sids)
-            state = _local_admin_membership(username, account_sid, "add")
+            state = _local_group_membership(group_name, username, account_sid, "add")
             if state["before"] and not owned:
                 # Another administrator may have added it between inspect and
-                # add. In that case do not claim ownership of their change.
-                added_sids.discard(WINDOWS_ADMINISTRATORS_SID)
+                # add. Do not claim ownership of their membership.
+                added_sids.discard(group_sid)
                 _save_managed_group_state(config, added_sids)
-                action = "already-member"
+                changes[group_name] = "already-member"
             else:
-                added_sids.add(WINDOWS_ADMINISTRATORS_SID)
-                action = "added-by-thessley" if not state["before"] else "already-managed-member"
-    elif owned:
-        state = _local_admin_membership(username, account_sid, "remove")
-        added_sids.discard(WINDOWS_ADMINISTRATORS_SID)
-        action = "removed-by-thessley" if state["before"] else "owned-membership-already-absent"
+                added_sids.add(group_sid)
+                changes[group_name] = "added-by-thessley" if not state["before"] else "already-managed-member"
+        elif owned:
+            state = _local_group_membership(group_name, username, account_sid, "remove")
+            added_sids.discard(group_sid)
+            changes[group_name] = "removed-by-thessley" if state["before"] else "owned-membership-already-absent"
 
     if set(config.get("managed_local_group_sids", [])) != added_sids:
         _save_managed_group_state(config, added_sids)
-    return action
+    return changes
 
 
 def sync_account(username: str) -> dict:
-    """Pull current Drupal rights, apply only Thessley-owned admin membership,
+    """Pull current Drupal rights, apply only Thessley-owned group membership,
     then report the resulting Windows local-group snapshot.
 
     Drupal's sign-in grant remains authoritative at every login. Local group
     changes are reconciled only for the mapped account and only for membership
-    that this agent itself added; pre-existing administrators are preserved.
+    that this agent itself added; pre-existing memberships are preserved.
     """
     config, key = _load(username)
     username = config["username"]
     response = _post_policy(config, key)
-    roles, actions, active_admin = _validated_policy(response)
-    admin_change = _apply_local_admin_policy(username, config, active_admin)
+    roles, actions, managed_groups, active = _validated_policy(response)
+    group_changes = _apply_managed_local_groups(username, config, managed_groups if active else [])
 
     groups = _windows_group_inventory(username)
     payload = json.dumps({"groups": groups}, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
@@ -503,7 +529,8 @@ def sync_account(username: str) -> dict:
     return {
         "roles": roles,
         "actions": actions,
-        "admin_change": admin_change,
+        "admin_change": group_changes.get("Administrators", "unchanged"),
+        "group_changes": group_changes,
         "groups_reported": len(groups),
     }
 
@@ -524,7 +551,7 @@ def sync_loop(stop_event, log, interval: int = 900) -> None:
                 log(
                     f"Drupal sync for {username!r}: {len(result['roles'])} roles, "
                     f"actions={','.join(result['actions']) or 'none'}, "
-                    f"Administrators={result['admin_change']}, "
+                    f"local groups={result['group_changes'] or 'unchanged'}, "
                     f"Windows groups reported={result['groups_reported']}"
                 )
             except AgentError as exc:
