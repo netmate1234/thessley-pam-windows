@@ -29,15 +29,22 @@ approval service. To prepare the account, open an elevated PowerShell and run:
 & 'C:\ProgramData\ThessleyPamWin\thessley-pam-win.cmd' drupal-setup --user sshuser --server 'https://192.168.1.200:10443' --tls-sha256 'PASTE_THE_64_CHARACTER_FINGERPRINT_FROM_DRUPAL_SETTINGS'
 ```
 
-The command creates a software ECDSA P-256 key and prints the machine ID,
-computer name, account SID hash, public key, and server details. Enter those
-values in **Drupal Admin → Windows Access → Enroll account**, link the binding
-to the intended Drupal user, grant that Drupal role **Windows sign-in** on the
-test computer, and scan the resulting enrollment QR with the phone. The phone receives the account in **Computers**. The
-machine and phone must be able to reach the HTTPS origin in the generated
-link. The exact leaf-certificate SHA-256 fingerprint is pinned before
-Windows sends any signed request, and HTTP redirects are refused. Update the
-pin deliberately whenever the server certificate is renewed.
+Use **Drupal Admin → Windows Access → Enroll account** to enter this PC's
+reachable IP, the local account name, and the Drupal identity. Copy the
+one-time command shown there into elevated PowerShell on the PC. It runs
+`drupal-enroll`, which gathers the machine ID, account SID hash, and public key,
+then sends them over HTTPS pinned to the Drupal certificate. The eight-digit
+pairing code expires after ten minutes, is single-use, and is bound to the IP
+entered in Drupal. The private key stays in the protected ProgramData folder.
+The helper displays the phone enrollment QR; scan it with Thessley Passkey.
+The phone then receives the account in **Computers**.
+
+Keep the PC and phone able to reach the HTTPS origin in the generated link.
+The exact leaf-certificate SHA-256 fingerprint is pinned before Windows sends
+any signed request, and HTTP redirects are refused. Update the pin deliberately
+whenever the server certificate is renewed. The older `drupal-setup` command
+remains available for manual diagnostics, but it is not the normal enrollment
+path.
 
 The same Drupal user can be linked to a local account named `admin` on many
 computers. The local `admin` account must already exist on each PC; each

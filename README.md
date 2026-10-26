@@ -67,7 +67,7 @@ while the wizard applies and tests the SSH gate.
 | `thessley_pam_win/gate.py` | what sshd runs instead of the shell; asks the service, then starts the shell or command |
 | `thessley_pam_win/daemon.py` | the approval service (SYSTEM, `127.0.0.1:47800`) |
 | `thessley_pam_win/approve.py` | the approval flow: link, QR code, signed answer, passes |
-| `thessley_pam_win/cli.py` | `thessley-pam-win enroll / list / remove / grace / passes / status / sshd-config` |
+| `thessley_pam_win/cli.py` | `thessley-pam-win enroll / drupal-enroll / list / remove / grace / passes / status / sshd-config` |
 | `thessley_pam_win/store.py`, `grants.py` | approvers and passes under `C:\ProgramData\ThessleyPamWin` |
 | `thessley_pam_win/web.py` | the admin web page: sign in with an approval, manage your approvers, settings, activity ([docs/WEB.md](docs/WEB.md), has the Windows steps) |
 | `thessley_pam_win/enroll.py`, `peer.py` | adding an approver (shared by the admin tool and the service); finding out which Windows account is on the other end of a local connection |

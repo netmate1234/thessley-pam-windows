@@ -175,6 +175,55 @@ def initialize(username: str, server_url: str, tls_sha256: str) -> dict:
     }
 
 
+def submit_pairing(username: str, pair_code: str, server_url: str, tls_sha256: str) -> dict:
+    """Register this PC account using Drupal's IP-bound one-time pairing code."""
+    username = store.normalize_user(username)
+    if not USER_RE.fullmatch(username) or not re.fullmatch(r"\d{8}", str(pair_code)):
+        raise ValueError("Enter the local account and the eight-digit pairing code shown in Drupal.")
+    resolved_server = _server_url(server_url)
+    pin = str(tls_sha256).strip().lower().replace(":", "")
+    if not re.fullmatch(r"[a-f0-9]{64}", pin):
+        raise ValueError("Use the 64-character TLS SHA-256 fingerprint shown in Drupal settings.")
+    if configured(username):
+        config, key = _load(username)
+        if config["server_url"] != resolved_server or config["tls_sha256"] != pin:
+            raise AgentError("This account already has a Drupal key for a different server. Keep it; do not overwrite it.")
+        sid_hash = _sid_hash(username)
+        values = {
+            "machine_id": config["machine_id"],
+            "hostname": machine.hostname(),
+            "username": username,
+            "sid_sha256": sid_hash,
+        }
+    else:
+        values = initialize(username, resolved_server, pin)
+    config, key = _load(username)
+    public_der = key.public_key().public_bytes(
+        serialization.Encoding.DER,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    public_key = base64.b64encode(public_der).decode("ascii")
+    public_key_hash = hashlib.sha256(public_key.encode("ascii")).hexdigest()
+    message = _canonical([
+        "pair", str(pair_code), values["machine_id"], username,
+        values["sid_sha256"], public_key_hash,
+    ])
+    signature = base64.b64encode(key.sign(message, ec.ECDSA(hashes.SHA256()))).decode("ascii")
+    endpoint = config["server_url"] + "/thessley-windows/v1/pair"
+    response = _post(endpoint, {
+        "pair_code": str(pair_code),
+        "machine_id": values["machine_id"],
+        "hostname": values["hostname"],
+        "username": username,
+        "sid_sha256": values["sid_sha256"],
+        "public_key_b64_der": public_key,
+        "signature": signature,
+    }, config["tls_sha256"])
+    if response.get("result") != "ok" or not isinstance(response.get("app_link"), str):
+        raise AgentError(str(response.get("message") or "Drupal did not complete Windows enrollment."))
+    return response
+
+
 def configured(username: str) -> bool:
     config_path, key_path = _paths(username)
     return os.path.isfile(config_path) and os.path.isfile(key_path)
