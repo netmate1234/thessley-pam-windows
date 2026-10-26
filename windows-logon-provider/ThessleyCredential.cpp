@@ -25,6 +25,17 @@
 #include "provider_diag.h"
 #include "password_vault.h"
 
+// Releasing the worker's final COM reference on the worker itself can destroy
+// CSampleCredential while its std::thread member is still joinable. The
+// std::thread destructor then calls std::terminate, which takes down LogonUI.
+// Transfer that reference to a pool thread; the destructor can safely join the
+// completed approval worker from there.
+static DWORD WINAPI ReleaseCredentialReference(LPVOID context)
+{
+    static_cast<CSampleCredential *>(context)->Release();
+    return 0;
+}
+
 static std::string Utf8(const wchar_t *text)
 {
     if (!text) return {};
@@ -469,11 +480,18 @@ void CSampleCredential::_StartApproval()
                 update(SFI_LOGONSTATUS_TEXT, L"Approval failed or expired. Select again to retry, or choose PIN.");
             }
             _approvalInProgress.store(false);
+            ProviderDiag(L"ApprovalWorkerFinished", ok ? S_OK : E_ABORT, 0);
             if (credential) credential->Release();
             if (events) events->Release();
             if (providerEvents) providerEvents->Release();
             CoUninitialize();
-            Release();
+            if (!QueueUserWorkItem(ReleaseCredentialReference, this, WT_EXECUTEDEFAULT))
+            {
+                // A rare pool-queue failure must not destroy this object on its
+                // own joinable thread. Keep the reference rather than crashing
+                // the Windows sign-in process; diagnostics make the leak visible.
+                ProviderDiag(L"QueueCredentialRelease", HRESULT_FROM_WIN32(GetLastError()), 0);
+            }
         });
     }
     catch (...)

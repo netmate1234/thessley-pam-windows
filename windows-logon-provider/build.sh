@@ -10,7 +10,7 @@ mkdir -p "$out_dir"
 "${tool_prefix}-g++" \
   -std=c++17 -DUNICODE -D_UNICODE -DWIN32_LEAN_AND_MEAN \
   -include mingw_compat.h -shared -static -pthread \
-  CSampleCredential.cpp CSampleProvider.cpp Dll.cpp guid.cpp helpers.cpp provider_diag.cpp password_vault.cpp \
+  ThessleyCredential.cpp CSampleProvider.cpp Dll.cpp guid.cpp helpers.cpp provider_diag.cpp password_vault.cpp \
   "$out_dir/provider-res.o" samplev2credentialprovider.def \
   -lcredui -lole32 -loleaut32 -lshlwapi -lsecur32 -ladvapi32 -lgdi32 -lws2_32 -luuid -lcrypt32 \
   -o "$out_dir/ThessleyCredentialProvider.dll"
