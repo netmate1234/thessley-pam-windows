@@ -28,6 +28,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from . import machine, store
 
 SIG_VERSION = "thessley_win_agent_v1"
+SIG_VERSION_V2 = "thessley_win_agent_v2"
 USER_RE = re.compile(r"^[a-z_][a-z0-9_.-]{0,31}$")
 WINDOWS_ADMINISTRATORS_SID = "S-1-5-32-544"
 WINDOWS_LOCAL_GROUPS = {
@@ -105,6 +106,193 @@ def _account_sid(username: str) -> str:
 
 def _sid_hash(username: str) -> str:
     return hashlib.sha256(_account_sid(username).encode("ascii")).hexdigest()
+
+
+def _resolve_principal(username: str, scope: str, authority: str = "") -> dict:
+    """Resolve a short account name to its exact Windows SID and account scope."""
+    username = store.normalize_user(username)
+    scope = str(scope).strip().lower()
+    authority = str(authority).strip().lower()
+    if scope not in ("local", "domain"):
+        raise ValueError("Choose a local or domain Windows account.")
+    if scope == "domain" and not re.fullmatch(r"[a-z0-9][a-z0-9_.@-]{0,127}", authority):
+        raise ValueError("Enter the domain's NetBIOS name shown in Drupal.")
+    if scope == "local" and authority:
+        raise ValueError("Leave the domain name blank for a local account.")
+    escaped_user = username.replace("'", "''")
+    escaped_authority = authority.replace("'", "''")
+    if scope == "domain":
+        account = f"[System.Security.Principal.NTAccount]::new('{escaped_authority}','{escaped_user}')"
+        authority_expr = f"'{escaped_authority}'"
+    else:
+        account = f"[System.Security.Principal.NTAccount]::new($env:COMPUTERNAME,'{escaped_user}')"
+        authority_expr = "$env:COMPUTERNAME.ToLowerInvariant()"
+    command = (
+        "$ErrorActionPreference='Stop'; "
+        f"$account={account}; "
+        "$sid=$account.Translate([System.Security.Principal.SecurityIdentifier]).Value; "
+        f"$authority={authority_expr}; "
+        "ConvertTo-Json -Compress -InputObject @{sid=$sid; authority=$authority}"
+    )
+    try:
+        result = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
+                                capture_output=True, text=True, errors="replace", timeout=20, check=True)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise AgentError("Could not resolve that Windows account and scope to a SID.") from exc
+    try:
+        resolved = json.loads(result.stdout.strip())
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise AgentError("Windows returned an invalid account identity.") from exc
+    sid = resolved.get("sid", "") if isinstance(resolved, dict) else ""
+    resolved_authority = resolved.get("authority", "") if isinstance(resolved, dict) else ""
+    if not re.fullmatch(r"S-1-(?:[0-9]+-)+[0-9]+", str(sid)) or not re.fullmatch(r"[A-Za-z0-9_.@-]{1,128}", str(resolved_authority)):
+        raise AgentError("Windows returned an invalid SID or account authority.")
+    sid_hash = hashlib.sha256(sid.encode("ascii")).hexdigest()
+    return {
+        "username": username,
+        "scope": scope,
+        "authority": str(resolved_authority).lower(),
+        "sid": sid,
+        "principal_id": sid_hash,
+    }
+
+
+def _paths_v2(principal_id: str) -> tuple[str, str]:
+    if not re.fullmatch(r"[a-f0-9]{64}", str(principal_id)):
+        raise ValueError("Invalid Windows principal identifier.")
+    folder = os.path.join(store.BASE, "drupal-agent")
+    return os.path.join(folder, principal_id + ".json"), os.path.join(folder, principal_id + ".pem")
+
+
+def _write_v2_identity(identity: dict, server_url: str, tls_sha256: str) -> tuple[dict, ec.EllipticCurvePrivateKey]:
+    config_path, key_path = _paths_v2(identity["principal_id"])
+    folder = os.path.dirname(config_path)
+    os.makedirs(folder, exist_ok=True)
+    if os.path.exists(config_path) or os.path.exists(key_path):
+        raise AgentError("A Drupal agent key already exists for this Windows SID. Keep it and create a fresh pairing code.")
+    _lock_windows_acl(folder, directory=True)
+    key = ec.generate_private_key(ec.SECP256R1())
+    private_pem = key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption())
+    config = {
+        "version": 2,
+        "server_url": _server_url(server_url),
+        "tls_sha256": tls_sha256,
+        "machine_id": machine.machine_id(),
+        "principal_id": identity["principal_id"],
+        "sid": identity["sid"],
+        "principal_type": identity["scope"],
+        "authority": identity["authority"],
+        "username": identity["username"],
+        "key_file": key_path,
+        "managed_local_group_sids": [],
+    }
+    try:
+        with open(key_path, "xb") as stream:
+            stream.write(private_pem)
+            stream.flush()
+            os.fsync(stream.fileno())
+        with open(config_path, "x", encoding="utf-8") as stream:
+            json.dump(config, stream, separators=(",", ":"))
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        _lock_windows_acl(key_path)
+        _lock_windows_acl(config_path)
+    except BaseException:
+        for path in (config_path, key_path):
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                pass
+        raise
+    return config, key
+
+
+def submit_pairing_v2(username: str, scope: str, authority: str, pair_code: str, server_url: str, tls_sha256: str) -> dict:
+    """Register one explicitly scoped Windows SID using the v2 agent protocol."""
+    identity = _resolve_principal(username, scope, authority)
+    if not re.fullmatch(r"\d{8}", str(pair_code)):
+        raise ValueError("Enter the eight-digit one-time pairing code shown in Drupal.")
+    server = _server_url(server_url)
+    pin = str(tls_sha256).strip().lower().replace(":", "")
+    if not re.fullmatch(r"[a-f0-9]{64}", pin):
+        raise ValueError("Use the 64-character TLS SHA-256 fingerprint shown in Drupal settings.")
+    config_path, key_path = _paths_v2(identity["principal_id"])
+    if os.path.isfile(config_path) and os.path.isfile(key_path):
+        config, key = _load_v2(identity["principal_id"])
+        if (config["server_url"] != server or config["tls_sha256"] != pin
+                or config["principal_type"] != identity["scope"] or config["authority"] != identity["authority"]
+                or config["username"] != identity["username"]):
+            raise AgentError("This Windows SID already has a different Drupal binding. Keep its existing key.")
+    else:
+        config, key = _write_v2_identity(identity, server, pin)
+    public_der = key.public_key().public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
+    public_key = base64.b64encode(public_der).decode("ascii")
+    key_hash = hashlib.sha256(public_key.encode("ascii")).hexdigest()
+    message = _canonical_v2([
+        "pair", str(pair_code), config["machine_id"], identity["principal_id"], identity["username"],
+        identity["scope"], identity["authority"], key_hash,
+    ])
+    signature = base64.b64encode(key.sign(message, ec.ECDSA(hashes.SHA256()))).decode("ascii")
+    endpoint = server + "/thessley-windows/v2/pair"
+    response = _post(endpoint, {
+        "pair_code": str(pair_code),
+        "machine_id": config["machine_id"],
+        "hostname": machine.hostname(),
+        "username": identity["username"],
+        "principal_type": identity["scope"],
+        "authority": identity["authority"],
+        "principal_id": identity["principal_id"],
+        "public_key_b64_der": public_key,
+        "signature": signature,
+    }, pin)
+    if response.get("result") != "ok" or not isinstance(response.get("app_link"), str):
+        raise AgentError(str(response.get("message") or "Drupal did not complete Windows SID enrollment."))
+    return response
+
+
+def _load_v2(principal_id: str) -> tuple[dict, ec.EllipticCurvePrivateKey]:
+    config_path, key_path = _paths_v2(principal_id)
+    try:
+        with open(config_path, encoding="utf-8") as stream:
+            config = json.load(stream)
+        if (config.get("version") != 2 or config.get("principal_id") != principal_id
+                or hashlib.sha256(str(config.get("sid", "")).encode("ascii")).hexdigest() != principal_id
+                or not re.fullmatch(r"S-1-(?:[0-9]+-)+[0-9]+", str(config.get("sid", "")))
+                or config.get("principal_type") not in ("local", "domain")
+                or not USER_RE.fullmatch(str(config.get("username", "")))
+                or not re.fullmatch(r"[A-Za-z0-9_.@-]{1,128}", str(config.get("authority", "")))
+                or not re.fullmatch(r"[a-f0-9]{32}", str(config.get("machine_id", "")))):
+            raise ValueError("principal mismatch")
+        if not re.fullmatch(r"[a-f0-9]{64}", str(config.get("tls_sha256", ""))):
+            raise ValueError("invalid TLS pin")
+        if os.path.normcase(os.path.abspath(config.get("key_file", ""))) != os.path.normcase(os.path.abspath(key_path)):
+            raise ValueError("key path mismatch")
+        config["server_url"] = _server_url(config.get("server_url", ""))
+        with open(key_path, "rb") as stream:
+            key = serialization.load_pem_private_key(stream.read(8192), password=None)
+    except (OSError, ValueError, TypeError, UnicodeError, json.JSONDecodeError) as exc:
+        raise AgentError("The SID-scoped Drupal agent configuration or private key is unavailable.") from exc
+    if not isinstance(key, ec.EllipticCurvePrivateKey) or key.curve.name != "secp256r1":
+        raise AgentError("The Drupal agent key is not an ECDSA P-256 key.")
+    return config, key
+
+
+def configured_sid(sid: str) -> bool:
+    if not re.fullmatch(r"S-1-(?:[0-9]+-)+[0-9]+", str(sid)):
+        return False
+    principal_id = hashlib.sha256(sid.encode("ascii")).hexdigest()
+    config_path, key_path = _paths_v2(principal_id)
+    return os.path.isfile(config_path) and os.path.isfile(key_path)
+
+
+def configured_legacy_local_sid(username: str, sid: str) -> bool:
+    """Only use a v1 username binding when its exact SID is the selected local account."""
+    try:
+        username = store.normalize_user(username)
+        return configured(username) and _account_sid(username).casefold() == str(sid).casefold()
+    except (AgentError, OSError, ValueError):
+        return False
 
 
 def initialize(username: str, server_url: str, tls_sha256: str) -> dict:
@@ -256,6 +444,12 @@ def _canonical(fields: list[str]) -> bytes:
     return "|".join([SIG_VERSION, *fields]).encode("utf-8")
 
 
+def _canonical_v2(fields: list[str]) -> bytes:
+    if any(not value or re.search(r"[|\s\x00-\x1f\x7f]", value) for value in fields):
+        raise AgentError("Invalid field in signed Windows v2 request.")
+    return "|".join([SIG_VERSION_V2, *fields]).encode("utf-8")
+
+
 def _post(url: str, payload: dict, tls_sha256: str, timeout: float = 8.0) -> dict:
     target = urlsplit(url)
     if target.scheme != "https" or not target.hostname or target.username or target.password or target.fragment:
@@ -328,8 +522,39 @@ def configured_users() -> list[str]:
             continue
         username = filename[:-5]
         if USER_RE.fullmatch(username) and configured(username):
+            # If this exact local SID has a v2 binding, do not sync the old
+            # username-keyed record as a second owner of the same group state.
+            try:
+                if configured_sid(_account_sid(username)):
+                    continue
+            except (AgentError, OSError, ValueError):
+                pass
             users.append(username)
     return sorted(set(users))
+
+
+def configured_principals() -> list[str]:
+    """List valid v2 SID hashes without exposing or loading their private keys."""
+    folder = os.path.join(store.BASE, "drupal-agent")
+    try:
+        names = os.listdir(folder)
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        raise AgentError("The Drupal agent account folder cannot be read.") from exc
+    principals = []
+    for filename in names:
+        principal_id = filename[:-5] if filename.endswith(".json") else ""
+        if re.fullmatch(r"[a-f0-9]{64}", principal_id) and configured_sid_hash(principal_id):
+            principals.append(principal_id)
+    return sorted(set(principals))
+
+
+def configured_sid_hash(principal_id: str) -> bool:
+    if not re.fullmatch(r"[a-f0-9]{64}", str(principal_id)):
+        return False
+    config_path, key_path = _paths_v2(principal_id)
+    return os.path.isfile(config_path) and os.path.isfile(key_path)
 
 
 def _powershell(command: str, error_message: str, timeout: float = 45.0) -> str:
@@ -348,7 +573,7 @@ def _powershell(command: str, error_message: str, timeout: float = 45.0) -> str:
     return result.stdout.strip()
 
 
-def _windows_group_inventory(username: str) -> list[dict]:
+def _windows_group_inventory(username: str, account_sid: str | None = None) -> list[dict]:
     """Return direct local-group memberships for the mapped local account.
 
     The PowerShell command uses group SIDs for enumeration, so localized group
@@ -358,10 +583,15 @@ def _windows_group_inventory(username: str) -> list[dict]:
     username = store.normalize_user(username)
     if not USER_RE.fullmatch(username):
         raise AgentError("The Windows account name cannot be used for local group inventory.")
+    if account_sid is not None and not re.fullmatch(r"S-1-(?:[0-9]+-)+[0-9]+", account_sid):
+        raise AgentError("The Windows account has an invalid SID.")
     escaped_user = username.replace("'", "''")
+    account_expr = (f"[System.Security.Principal.SecurityIdentifier]::new('{account_sid}')"
+                    if account_sid is not None else
+                    f"([System.Security.Principal.NTAccount]::new($env:COMPUTERNAME,'{escaped_user}')).Translate([System.Security.Principal.SecurityIdentifier])")
     command = (
         "$ErrorActionPreference='Stop'; "
-        f"$account=([System.Security.Principal.NTAccount]::new($env:COMPUTERNAME,'{escaped_user}')).Translate([System.Security.Principal.SecurityIdentifier]).Value; "
+        f"$account=({account_expr}).Value; "
         "$rows=@(foreach($group in Get-LocalGroup -ErrorAction Stop){ "
         "$members=@(Get-LocalGroupMember -SID $group.SID -ErrorAction Stop); "
         "if($members | Where-Object { $_.SID -and $_.SID.Value -eq $account }) "
@@ -402,6 +632,17 @@ def _post_policy(config: dict, key: ec.EllipticCurvePrivateKey) -> dict:
     timestamp = int(time.time())
     signature = _signature(key, ["policy", machine_id, username, str(timestamp)])
     url = f"{config['server_url']}/thessley-windows/v1/{machine_id}/{quote(username, safe='')}/policy"
+    return _post(url, {"timestamp": timestamp, "signature": signature}, config["tls_sha256"])
+
+
+def _post_policy_v2(config: dict, key: ec.EllipticCurvePrivateKey) -> dict:
+    timestamp = int(time.time())
+    signature = base64.b64encode(key.sign(
+        _canonical_v2(["policy", config["machine_id"], config["principal_id"], str(timestamp)]),
+        ec.ECDSA(hashes.SHA256()),
+    )).decode("ascii")
+    url = (f"{config['server_url']}/thessley-windows/v2/{config['machine_id']}/"
+           f"{config['principal_id']}/policy")
     return _post(url, {"timestamp": timestamp, "signature": signature}, config["tls_sha256"])
 
 
@@ -478,7 +719,10 @@ def _local_admin_membership(username: str, account_sid: str, operation: str) -> 
 
 
 def _save_managed_group_state(config: dict, added_sids: set[str]) -> None:
-    config_path, _ = _paths(config["username"])
+    if config.get("version") == 2:
+        config_path, _ = _paths_v2(config["principal_id"])
+    else:
+        config_path, _ = _paths(config["username"])
     folder = os.path.dirname(config_path)
     config["managed_local_group_sids"] = sorted(added_sids)
     fd, temp_path = tempfile.mkstemp(dir=folder, prefix=".drupal-agent-", suffix=".json")
@@ -499,14 +743,14 @@ def _save_managed_group_state(config: dict, added_sids: set[str]) -> None:
         raise
 
 
-def _apply_managed_local_groups(username: str, config: dict, desired_groups: list[str]) -> dict[str, str]:
+def _apply_managed_local_groups(username: str, config: dict, desired_groups: list[str], account_sid: str | None = None) -> dict[str, str]:
     added_sids = set(config.get("managed_local_group_sids", []))
     supported_sids = set(WINDOWS_LOCAL_GROUPS.values())
     if any(not isinstance(sid, str) or sid not in supported_sids for sid in added_sids):
         raise AgentError("The local record of Thessley-managed Windows groups is invalid.")
     if any(group not in WINDOWS_LOCAL_GROUPS for group in desired_groups):
         raise AgentError("The Drupal policy contains an unsupported Windows local group.")
-    account_sid = _account_sid(username)
+    account_sid = account_sid or _account_sid(username)
     desired_sids = {WINDOWS_LOCAL_GROUPS[group] for group in desired_groups}
     changes = {}
 
@@ -584,6 +828,44 @@ def sync_account(username: str) -> dict:
     }
 
 
+def sync_principal(principal_id: str) -> dict:
+    """Synchronize current rights and Windows groups for one exact SID binding."""
+    config, key = _load_v2(principal_id)
+    response = _post_policy_v2(config, key)
+    roles, actions, managed_groups, active = _validated_policy(response)
+    account_sid = config["sid"]
+    group_changes = _apply_managed_local_groups(
+        config["username"], config, managed_groups if active else [], account_sid=account_sid,
+    )
+    groups = _windows_group_inventory(config["username"], account_sid=account_sid)
+    payload = json.dumps({"groups": groups}, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    if len(payload) > MAX_INVENTORY_BYTES:
+        raise AgentError("The Windows local-group inventory is too large to report.")
+    timestamp = int(time.time())
+    digest = hashlib.sha256(payload).hexdigest()
+    signature = base64.b64encode(key.sign(
+        _canonical_v2(["inventory", config["machine_id"], principal_id, str(timestamp), digest]),
+        ec.ECDSA(hashes.SHA256()),
+    )).decode("ascii")
+    inventory_url = (f"{config['server_url']}/thessley-windows/v2/{config['machine_id']}/"
+                     f"{principal_id}/inventory")
+    result = _post(inventory_url, {
+        "timestamp": timestamp,
+        "inventory_b64": base64.b64encode(payload).decode("ascii"),
+        "signature": signature,
+    }, config["tls_sha256"])
+    if result.get("result") != "ok" or result.get("groups_received") != len(groups):
+        raise AgentError(str(result.get("message") or "Drupal did not accept the Windows group inventory."))
+    return {
+        "username": config["username"],
+        "authority": config["authority"],
+        "roles": roles,
+        "actions": actions,
+        "group_changes": group_changes,
+        "groups_reported": len(groups),
+    }
+
+
 def sync_loop(stop_event, log, interval: int = 900) -> None:
     """Refresh configured account policy and group inventory in the service."""
     while not stop_event.is_set():
@@ -607,6 +889,26 @@ def sync_loop(stop_event, log, interval: int = 900) -> None:
                 log(f"Drupal sync for {username!r} failed: {exc}", True)
             except Exception as exc:
                 log(f"unexpected Drupal sync error for {username!r}: {exc!r}", True)
+        try:
+            principals = configured_principals()
+        except AgentError as exc:
+            log(f"Drupal sync could not enumerate SID-bound accounts: {exc}", True)
+            principals = []
+        for principal_id in principals:
+            if stop_event.is_set():
+                break
+            try:
+                result = sync_principal(principal_id)
+                log(
+                    f"Drupal sync for {result['authority']}\\{result['username']}: {len(result['roles'])} roles, "
+                    f"actions={','.join(result['actions']) or 'none'}, "
+                    f"local groups={result['group_changes'] or 'unchanged'}, "
+                    f"Windows groups reported={result['groups_reported']}"
+                )
+            except AgentError as exc:
+                log(f"Drupal sync for SID {principal_id[:12]} failed: {exc}", True)
+            except Exception as exc:
+                log(f"unexpected Drupal sync error for SID {principal_id[:12]}: {exc!r}", True)
         stop_event.wait(max(60, int(interval)))
 
 
@@ -635,6 +937,85 @@ def _validate_app_link(link: str, config: dict, request_id: str, nonce: str) -> 
             or query.get("u", [""])[0] != config["username"]
             or not re.fullmatch(r"[a-f0-9]{64}", query["fp"][0])):
         raise AgentError("Drupal returned a phone link for a different server or Windows account.")
+
+
+def _validate_v2_app_link(link: str, config: dict, request_id: str, nonce: str, context: str) -> None:
+    parsed = urlsplit(link)
+    try:
+        query = parse_qs(parsed.query, strict_parsing=True)
+    except ValueError as exc:
+        raise AgentError("Drupal returned a malformed Windows v2 phone link.") from exc
+    server = urlsplit(config["server_url"])
+    required = ("h", "p", "fp", "id", "n", "m", "u", "scope", "auth", "ctx")
+    if any(len(query.get(name, [])) != 1 for name in required):
+        raise AgentError("Drupal returned an incomplete Windows v2 phone link.")
+    try:
+        link_port = int(query["p"][0])
+    except ValueError as exc:
+        raise AgentError("Drupal returned an incomplete Windows v2 phone link.") from exc
+    if (parsed.scheme != "thessleypam" or parsed.netloc != "login"
+            or query["h"][0].lower() != (server.hostname or "").lower()
+            or link_port != (server.port or 443)
+            or query["fp"][0].lower() != config["tls_sha256"]
+            or query["id"][0] != request_id or query["n"][0] != nonce
+            or query["m"][0] != config["machine_id"]
+            or query["u"][0] != config["username"]
+            or query["scope"][0] != config["principal_type"]
+            or query["auth"][0].lower() != config["authority"].lower()
+            or query["ctx"][0] != context
+            or not re.fullmatch(r"[a-f0-9]{64}", query["fp"][0])):
+        raise AgentError("Drupal returned a phone link for a different Windows SID or logon context.")
+
+
+def run_login_v2(sid: str, context: str, say, cancel, log=None) -> bool:
+    """Ask Drupal for phone approval using the selected Windows account SID, never its ambiguous name."""
+    log = log or (lambda _message, _warn=False: None)
+    if not re.fullmatch(r"S-1-(?:[0-9]+-)+[0-9]+", str(sid)) or context not in ("interactive", "unlock"):
+        raise AgentError("The selected Windows SID or logon context is invalid.")
+    principal_id = hashlib.sha256(sid.encode("ascii")).hexdigest()
+    config, key = _load_v2(principal_id)
+    machine_id = config["machine_id"]
+    root = config["server_url"]
+    timestamp = int(time.time())
+    client_nonce = secrets.token_urlsafe(32)
+    fields = [
+        "challenge", machine_id, principal_id, config["principal_type"], config["authority"],
+        config["username"], context, client_nonce, str(timestamp),
+    ]
+    signature = base64.b64encode(key.sign(_canonical_v2(fields), ec.ECDSA(hashes.SHA256()))).decode("ascii")
+    route = f"{root}/thessley-windows/v2/{machine_id}/{principal_id}/challenge/{context}"
+    response = _post(route, {"client_nonce": client_nonce, "timestamp": timestamp, "signature": signature}, config["tls_sha256"])
+    if response.get("result") != "ok":
+        raise AgentError(str(response.get("message") or "Drupal did not start the Windows v2 approval."))
+    request_id, nonce, link, expires_in = response.get("request_id"), response.get("nonce"), response.get("app_link"), response.get("expires_in")
+    if (not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{32,64}", request_id)
+            or not isinstance(nonce, str) or not re.fullmatch(r"[A-Za-z0-9_-]{32,64}", nonce)
+            or not isinstance(link, str) or not isinstance(expires_in, int) or not 30 <= expires_in <= 600):
+        raise AgentError("Drupal returned an invalid Windows v2 approval request.")
+    _validate_v2_app_link(link, config, request_id, nonce, context)
+    say("Link: " + link)
+    say("Waiting for phone approval...")
+    deadline = time.monotonic() + min(expires_in, 120)
+    while time.monotonic() < deadline:
+        if cancel.is_set():
+            return False
+        timestamp = int(time.time())
+        poll_fields = ["poll", machine_id, principal_id, request_id, nonce, str(timestamp)]
+        poll_signature = base64.b64encode(key.sign(_canonical_v2(poll_fields), ec.ECDSA(hashes.SHA256()))).decode("ascii")
+        status_url = f"{root}/thessley-windows/v2/{machine_id}/{principal_id}/requests/{request_id}/status"
+        result = _post(status_url, {"timestamp": timestamp, "signature": poll_signature}, config["tls_sha256"], timeout=5.0)
+        status = result.get("result")
+        if status == "approved":
+            say("Phone approval accepted.")
+            return True
+        if status in ("denied", "expired", "consumed"):
+            say("Phone approval was not accepted.")
+            return False
+        if status != "pending":
+            raise AgentError("Drupal returned an unknown Windows v2 approval status.")
+        cancel.wait(1.0)
+    say("Phone approval timed out.")
+    return False
 
 
 def run_login(username: str, say, cancel, log=None) -> bool:

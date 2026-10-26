@@ -98,6 +98,10 @@ class Handler(socketserver.StreamRequestHandler):
                 "approve", "enroll", "admin-enroll", "web-approve", "web-enroll", "windows-logon", "windows-logon-test")
             user = req["user"]
             assert isinstance(user, str)
+            sid = req.get("sid", "")
+            scope = req.get("principal_type", "")
+            context = req.get("logon_context", "")
+            assert isinstance(sid, str) and isinstance(scope, str) and isinstance(context, str)
             rhost = req.get("rhost") or grants.LOCAL
             assert req["op"] in ("enroll", "windows-logon") or valid_rhost(rhost)
         except Exception:
@@ -119,7 +123,7 @@ class Handler(socketserver.StreamRequestHandler):
             elif req["op"] == "admin-enroll":
                 ok = self._admin_enroll(user, cancel)
             elif req["op"] == "windows-logon":
-                ok = self._windows_logon(user, cancel)
+                ok = self._windows_logon(user, cancel, sid, scope, context)
             elif req["op"] == "windows-logon-test":
                 ok = self._windows_logon_test(user, cancel)
             else:
@@ -231,7 +235,7 @@ class Handler(socketserver.StreamRequestHandler):
             with self.server.enrolling_lock:
                 self.server.enrolling.discard(user)
 
-    def _windows_logon(self, user: str, cancel: threading.Event) -> bool:
+    def _windows_logon(self, user: str, cancel: threading.Event, sid: str = "", scope: str = "", context: str = "") -> bool:
         """A one-time phone approval for the Windows unlock tile, called by LogonUI as SYSTEM.
 
         Do not accept this operation from ordinary local processes, and never consume or create an SSH grace pass.
@@ -303,12 +307,34 @@ class Handler(socketserver.StreamRequestHandler):
             if not self._send({"say": line}):
                 cancel.set()
 
-        if drupal_agent.configured(user):
+        if sid and drupal_agent.configured_sid(sid):
+            try:
+                return drupal_agent.run_login_v2(sid, context, say, cancel, log)
+            except drupal_agent.AgentError as exc:
+                self._send({"say": "Thessley Passkey: the distributed approval service is unavailable. Choose PIN or password, or retry."})
+                log(f"Drupal Windows approval refused for {user!r}: {exc}", True)
+                return False
+
+        if sid and scope == "domain":
+            self._send({"say": "This domain account has no SID-bound Thessley enrollment. Choose PIN or password, or enroll this exact account in Drupal."})
+            log(f"Unenrolled domain principal refused for {user!r}", True)
+            return False
+
+        if sid and scope == "local" and drupal_agent.configured_legacy_local_sid(user, sid):
             try:
                 return drupal_agent.run_login(user, say, cancel, log)
             except drupal_agent.AgentError as exc:
                 self._send({"say": "Thessley Passkey: the distributed approval service is unavailable. Choose PIN or password, or retry."})
-                log(f"Drupal Windows approval refused for {user!r}: {exc}", True)
+                log(f"Legacy Drupal Windows approval refused for {user!r}: {exc}", True)
+                return False
+
+        # Older providers do not supply a SID. Preserve their legacy username-based behavior until the tile is updated.
+        if not sid and drupal_agent.configured(user):
+            try:
+                return drupal_agent.run_login(user, say, cancel, log)
+            except drupal_agent.AgentError as exc:
+                self._send({"say": "Thessley Passkey: the distributed approval service is unavailable. Choose PIN or password, or retry."})
+                log(f"Legacy Drupal Windows approval refused for {user!r}: {exc}", True)
                 return False
 
         return approve.run(

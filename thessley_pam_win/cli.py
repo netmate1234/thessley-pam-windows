@@ -244,6 +244,27 @@ def cmd_drupal_enroll(args) -> int:
     return 0
 
 
+def cmd_drupal_enroll_v2(args) -> int:
+    """Enroll one local/domain Windows principal, identified by its account SID."""
+    _need_admin()
+    try:
+        result = drupal_agent.submit_pairing_v2(
+            args.user, args.scope, args.authority, args.pair_code, args.server, args.tls_sha256,
+        )
+    except (drupal_agent.AgentError, OSError, ValueError) as exc:
+        sys.exit(f"Windows SID enrollment was not confirmed: {exc}\nThe protected PC key was kept so you can retry with a fresh Drupal pairing code.")
+    link = result["app_link"]
+    print(f"Windows {args.scope} account registered: {result.get('account', args.user)} on {result.get('machine', machine.hostname())}.")
+    print("Scan this enrollment QR with Thessley Passkey. The request expires in five minutes:")
+    rows = qr.lines(link, border=1)
+    if rows:
+        print("\n".join(rows))
+    else:
+        print("QR support is unavailable in this installation. Open this link on the phone:")
+        print(link)
+    return 0
+
+
 WEB_TASK = "ThessleyPamWinWeb"
 
 
@@ -436,6 +457,13 @@ def main(argv=None) -> int:
     de.add_argument("--server", required=True, help="HTTPS Drupal site origin")
     de.add_argument("--tls-sha256", required=True, help="64-character certificate fingerprint from Drupal settings")
     de.add_argument("--pair-code", required=True, help="eight-digit one-time code from the Drupal enrollment page")
+    de2 = sub.add_parser("drupal-enroll-v2", help="enroll a SID-scoped local or domain Windows account")
+    de2.add_argument("--user", required=True, help="short Windows account name")
+    de2.add_argument("--scope", choices=("local", "domain"), required=True, help="local account or domain principal")
+    de2.add_argument("--authority", default="", help="domain NetBIOS name; omitted for a local account")
+    de2.add_argument("--server", required=True, help="HTTPS Drupal site origin")
+    de2.add_argument("--tls-sha256", required=True, help="64-character certificate fingerprint from Drupal settings")
+    de2.add_argument("--pair-code", required=True, help="eight-digit one-time code from the Drupal enrollment page")
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # the QR code is drawn with block characters
     a = p.parse_args(argv)
@@ -447,6 +475,7 @@ def main(argv=None) -> int:
         "sshd-config": cmd_sshd_config, "self-enroll": cmd_self_enroll, "web": cmd_web,
         "drupal-setup": cmd_drupal_setup,
         "drupal-enroll": cmd_drupal_enroll,
+        "drupal-enroll-v2": cmd_drupal_enroll_v2,
     }[a.cmd](a)
 
 

@@ -402,6 +402,7 @@ void CSampleCredential::_StartApproval()
                         ProviderDiag(L"ResolveLogonAccountFromSid", accountHr, 0);
                         std::string user = Utf8(SUCCEEDED(accountHr)
                             ? windowsAccount.c_str() : _pszQualifiedUserName);
+                        std::string sid = _pszUserSid != nullptr ? Utf8(_pszUserSid) : "";
                         std::string escaped;
                         for (char c : user)
                         {
@@ -409,7 +410,18 @@ void CSampleCredential::_StartApproval()
                             if (static_cast<unsigned char>(c) < 0x20) continue;
                             escaped.push_back(c);
                         }
-                        const std::string request = "{\"op\":\"windows-logon\",\"user\":\"" + escaped + "\"}\n";
+                        std::string escapedSid;
+                        for (char c : sid)
+                        {
+                            if (c == '"' || c == '\\') escapedSid.push_back('\\');
+                            if (static_cast<unsigned char>(c) < 0x20) continue;
+                            escapedSid.push_back(c);
+                        }
+                        const char *principalType = _fIsLocalUser ? "local" : "domain";
+                        const char *logonContext = _cpus == CPUS_UNLOCK_WORKSTATION ? "unlock" : "interactive";
+                        const std::string request = "{\"op\":\"windows-logon\",\"user\":\"" + escaped +
+                            "\",\"sid\":\"" + escapedSid + "\",\"principal_type\":\"" + principalType +
+                            "\",\"logon_context\":\"" + logonContext + "\"}\n";
                         size_t sent = 0;
                         while (sent < request.size() && !_approvalCancelled.load())
                         {

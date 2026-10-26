@@ -20,24 +20,27 @@ The executable is written to `windows-logon-test/build/ThessleySignInTest.exe`. 
 
 ### Opt-in Drupal approval server prototype
 
-The Windows service can now use the separate Thessley Windows Access Drupal
-module as the phone-approval server for one local Windows account. Accounts
-without this per-account agent configuration keep using the existing local
-approval service. To prepare the account, open an elevated PowerShell and run:
+The Windows service can use the separate Thessley Windows Access Drupal
+module for SID-scoped local or domain Windows accounts. Accounts without a
+Drupal binding keep using the existing local approval service. The current
+protocol is v2: it uses the same Thessley PAM app links, but binds every
+request to the selected account SID, scope, authority, and sign-in/unlock
+context. V1 local bindings remain supported for compatibility.
 
 ```powershell
-& 'C:\ProgramData\ThessleyPamWin\thessley-pam-win.cmd' drupal-setup --user sshuser --server 'https://192.168.1.200:10443' --tls-sha256 'PASTE_THE_64_CHARACTER_FINGERPRINT_FROM_DRUPAL_SETTINGS'
+& 'C:\ProgramData\ThessleyPamWin\thessley-pam-win.cmd' drupal-enroll-v2 --user 'sshuser' --scope local --server 'https://192.168.1.200:10443' --tls-sha256 'PASTE_THE_64_CHARACTER_FINGERPRINT_FROM_DRUPAL_SETTINGS' --pair-code 'CODE_FROM_DRUPAL'
 ```
 
 Use **Drupal Admin → Windows Access → Enroll account** to enter this PC's
-reachable IP, the local account name, and the Drupal identity. Copy the
-one-time command shown there into elevated PowerShell on the PC. It runs
-`drupal-enroll`, which gathers the machine ID, account SID hash, and public key,
-then sends them over HTTPS pinned to the Drupal certificate. The eight-digit
-pairing code expires after ten minutes, is single-use, and is bound to the IP
-entered in Drupal. The private key stays in the protected ProgramData folder.
-The helper displays the phone enrollment QR; scan it with Thessley Passkey.
-The phone then receives the account in **Computers**.
+reachable IP, Windows account name, local/domain scope, and linked Drupal
+identity. Copy the generated one-time command into elevated PowerShell on
+that PC. The `drupal-enroll-v2` command resolves the account to its SID,
+creates a SID-keyed P-256 agent key, and sends the public key over HTTPS pinned
+to the Drupal certificate. The code expires after ten minutes, is single-use,
+and is bound to the IP entered in Drupal. The private key stays in the
+protected ProgramData folder. The helper displays the phone enrollment QR;
+scan it with Thessley Passkey. The phone stores the scoped account in
+**Computers**.
 
 Keep the PC and phone able to reach the HTTPS origin in the generated link.
 The exact leaf-certificate SHA-256 fingerprint is pinned before Windows sends
@@ -47,16 +50,19 @@ remains available for manual diagnostics, but it is not the normal enrollment
 path.
 
 The same Drupal user can be linked to a local account named `admin` on many
-computers. The local `admin` account must already exist on each PC; each
-machine has a distinct SID and agent key, and the phone is enrolled separately
-for each machine/account binding. Assign the Drupal user to the
+computers or to a domain account. A local account must already exist on each
+PC; each machine has a distinct SID and agent key, and the phone is enrolled
+separately for each machine/account binding. A domain account is resolved to
+its SID using the chosen NetBIOS authority. Assign the Drupal user to the
 `Windows Administrators` role and grant its role the `all_windows` sign-in and
 local-administrator actions to apply the policy across enrolled PCs.
 
-After enrollment, the next use of the Thessley lock-screen tile obtains its
-phone request from Drupal, shows the Drupal PAM link as a QR, and polls the
-signed status endpoint. A revoked phone or removed Drupal grant denies the
-attempt. Other accounts continue to use the existing local approval flow.
+After enrollment, the next use of the Thessley lock-screen tile sends the
+selected SID and sign-in/unlock context to Drupal, shows the returned PAM link
+as a QR, and polls the signed v2 status endpoint. A same-named local account
+cannot be mistaken for a domain account. A revoked phone or removed Drupal
+grant denies the attempt. Other accounts continue to use the existing local
+approval flow.
 The SYSTEM service also syncs Drupal policy and direct Windows local-group
 inventory immediately after service start and every 15 minutes. A
 `windows.local_admin`, `windows.remote_desktop`,
@@ -76,6 +82,11 @@ rotation must also update the Drupal account binding, and this prototype
 refuses to replace an existing key.
 
 `windows-logon-provider` contains an experimental Credential Provider based on Microsoft's V2 sample. It supports workstation unlock (`CPUS_UNLOCK_WORKSTATION`) and interactive logon (`CPUS_LOGON`). It calls the service's `windows-logon` operation, which is accepted only from SYSTEM. First select **Set up QR-only sign-in**, approve the phone request, enter the account's current Windows password, and submit. The provider writes that password to a DPAPI machine-protected file only after Windows reports a successful sign-in. Later Thessley tile sign-ins request phone approval and submit the saved password without showing a password field. Password changes require the **Update saved QR sign-in** flow. If the stored password is rejected, the tile reveals that update flow. This vault is keyed by the Windows account SID and supports both local and Microsoft accounts through their existing credential serialization paths. The built-in Windows PIN and password providers remain separate recovery choices.
+
+This prototype covers the local sign-in screen and workstation unlock. It does
+not implement Windows remote/network logon, Remote Desktop credential
+delegation, or Credential UI (`CredUI`) flows. Drupal group membership cannot
+create a missing Windows account; that account must already exist on the PC.
 
 This is a credential-provider password vault, not passwordless Windows authentication: the Windows password is reversibly encrypted at rest and supplied to the regular Windows authentication package after approval. The vault is scoped to the account SID and stored under the installer-protected `C:\ProgramData\ThessleyPamWin\credential-provider` directory. Local administrators and SYSTEM can access machine-protected data, as they can administer the machine.
 
