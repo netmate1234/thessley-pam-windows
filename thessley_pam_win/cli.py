@@ -238,6 +238,8 @@ def cmd_drupal_enroll(args) -> int:
     rows = qr.lines(link, border=1)
     if rows:
         print("\n".join(rows))
+        print("If the QR is clipped, open this complete one-time link in Thessley Passkey:")
+        print(link)
     else:
         print("QR support is unavailable in this installation. Open this link on the phone:")
         print(link)
@@ -259,6 +261,8 @@ def cmd_drupal_enroll_v2(args) -> int:
     rows = qr.lines(link, border=1)
     if rows:
         print("\n".join(rows))
+        print("If the QR is clipped, open this complete one-time link in Thessley Passkey:")
+        print(link)
     else:
         print("QR support is unavailable in this installation. Open this link on the phone:")
         print(link)
