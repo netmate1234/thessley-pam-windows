@@ -63,6 +63,7 @@ def main() -> None:
                      ROOT / "install" / "confirm-setup.ps1", ROOT / "install" / "setup-logon-provider.ps1"]
     service_files += files_under(ROOT / "thessley_pam_win", {".py", ".pem"})
     service_files += [ROOT / "docs" / "SSH.md", ROOT / "docs" / "WEB.md",
+                      ROOT / "docs" / "WINDOWS-LOGON-PROTOTYPE.md",
                       OUT / "windows-desktop-approval.zip",
                       OUT / "windows-qr-signin-experimental.zip"]
     build(
@@ -76,6 +77,8 @@ def main() -> None:
         "On multi-adapter PCs, the guided installer asks which IPv4 adapter the phone can reach and keeps using that adapter if its DHCP address changes.\n"
         "Weekly automatic updates run Sunday at 03:00 local time by default and can be switched off in Admin > Settings.\n"
         "They verify the package hash and reuse the installer's rollback; SSH policy and firewall rules are preserved.\n"
+        "An opt-in development prototype can route one Windows sign-in account through the Thessley Windows Access Drupal module.\n"
+        "See docs/WINDOWS-LOGON-PROTOTYPE.md; it is not enabled unless an administrator creates its per-account key and Drupal binding.\n"
         "For cloud mode with changing public client IPs, choose the cloud option in the installer (TCP 22/47810, optionally 47820).\n"
         "Cloud-provider firewall rules are configured separately.\n"
         "install or update the experimental\n"

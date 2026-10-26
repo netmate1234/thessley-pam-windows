@@ -27,7 +27,7 @@ import subprocess
 import sys
 import threading
 
-from . import enroll, grants, machine, ssh_policy, store
+from . import drupal_agent, enroll, grants, machine, ssh_policy, store
 from .daemon import HOST, PORT
 from .gate import current_user
 
@@ -208,6 +208,20 @@ def cmd_ssh_defaults(args) -> int:
         print("No new QR policies were needed.")
     if skipped:
         print("Not changed: " + ", ".join(skipped))
+    return 0
+
+
+def cmd_drupal_setup(args) -> int:
+    """Create the prototype's protected agent key and print Drupal form values."""
+    _need_admin()
+    try:
+        values = drupal_agent.initialize(args.user, args.server, args.tls_sha256)
+    except (drupal_agent.AgentError, OSError, ValueError) as exc:
+        sys.exit(f"Could not prepare the Drupal Windows agent: {exc}")
+    print("Prototype agent identity created. Import these fields in Thessley Windows Access > Enroll Windows account:")
+    print(json.dumps(values, indent=2, ensure_ascii=False))
+    print("The private key stays in the SYSTEM/Administrators-only ProgramData folder. It is a software key, not TPM-backed.")
+    print("Windows sign-in will use the Drupal server for phone approval for this account; local approval remains for other accounts.")
     return 0
 
 
@@ -394,6 +408,10 @@ def main(argv=None) -> int:
     sc.add_argument("--user")
     sc.add_argument("--factor", choices=("password", "key", "key-password"), default="password",
                     help="required sshd first factor(s); phone QR approval still follows")
+    ds = sub.add_parser("drupal-setup", help="prepare an account key for the distributed Drupal login prototype")
+    ds.add_argument("--user", required=True, help="local Windows account to enroll")
+    ds.add_argument("--server", required=True, help="HTTPS Drupal site origin")
+    ds.add_argument("--tls-sha256", required=True, help="64-character certificate fingerprint from Drupal settings")
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # the QR code is drawn with block characters
     a = p.parse_args(argv)
@@ -403,6 +421,7 @@ def main(argv=None) -> int:
         "grace": cmd_grace, "passes": cmd_passes, "end-pass": cmd_end_pass, "status": cmd_status,
         "ssh-defaults": cmd_ssh_defaults,
         "sshd-config": cmd_sshd_config, "self-enroll": cmd_self_enroll, "web": cmd_web,
+        "drupal-setup": cmd_drupal_setup,
     }[a.cmd](a)
 
 

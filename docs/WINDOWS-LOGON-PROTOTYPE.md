@@ -18,6 +18,39 @@ The executable is written to `windows-logon-test/build/ThessleySignInTest.exe`. 
 
 ## Experimental credential provider with QR-only sign-in after setup
 
+### Opt-in Drupal approval server prototype
+
+The Windows service can now use the separate Thessley Windows Access Drupal
+module as the phone-approval server for one local Windows account. Accounts
+without this per-account agent configuration keep using the existing local
+approval service. To prepare the account, open an elevated PowerShell and run:
+
+```powershell
+& 'C:\ProgramData\ThessleyPamWin\thessley-pam-win.cmd' drupal-setup --user sshuser --server 'https://192.168.1.200:10443' --tls-sha256 'PASTE_THE_64_CHARACTER_FINGERPRINT_FROM_DRUPAL_SETTINGS'
+```
+
+The command creates a software ECDSA P-256 key and prints the machine ID,
+computer name, account SID hash, public key, and server details. Enter those
+values in **Drupal Admin → Thessley Windows Access → Enroll Windows account**,
+link the binding to the intended Drupal user, grant that Drupal role only
+**Windows sign-in** on the test computer, and scan the resulting enrollment
+QR with the phone. The phone receives the account in **Computers**. The
+machine and phone must be able to reach the HTTPS origin in the generated
+link. The exact leaf-certificate SHA-256 fingerprint is pinned before
+Windows sends any signed request, and HTTP redirects are refused. Update the
+pin deliberately whenever the server certificate is renewed.
+
+After enrollment, the next use of the Thessley lock-screen tile obtains its
+phone request from Drupal, shows the Drupal PAM link as a QR, and polls the
+signed status endpoint. A revoked phone or removed Drupal grant denies the
+attempt. Other accounts continue to use the existing local approval flow.
+This prototype key is protected by SYSTEM/Administrators ACLs, but is not
+TPM-backed. It still gates the existing saved-password credential provider;
+it does not make Windows sign-in passwordless. Keep PIN/password recovery
+available and test on a disposable VM first. Do not use `--rotate`: key
+rotation must also update the Drupal account binding, and this prototype
+refuses to replace an existing key.
+
 `windows-logon-provider` contains an experimental Credential Provider based on Microsoft's V2 sample. It supports workstation unlock (`CPUS_UNLOCK_WORKSTATION`) and interactive logon (`CPUS_LOGON`). It calls the service's `windows-logon` operation, which is accepted only from SYSTEM. First select **Set up QR-only sign-in**, approve the phone request, enter the account's current Windows password, and submit. The provider writes that password to a DPAPI machine-protected file only after Windows reports a successful sign-in. Later Thessley tile sign-ins request phone approval and submit the saved password without showing a password field. Password changes require the **Update saved QR sign-in** flow. If the stored password is rejected, the tile reveals that update flow. This vault is keyed by the Windows account SID and supports both local and Microsoft accounts through their existing credential serialization paths. The built-in Windows PIN and password providers remain separate recovery choices.
 
 This is a credential-provider password vault, not passwordless Windows authentication: the Windows password is reversibly encrypted at rest and supplied to the regular Windows authentication package after approval. The vault is scoped to the account SID and stored under the installer-protected `C:\ProgramData\ThessleyPamWin\credential-provider` directory. Local administrators and SYSTEM can access machine-protected data, as they can administer the machine.
@@ -35,6 +68,12 @@ These changes affect only the viewer UI, not provider registration, saved creden
 or PIN/password recovery tiles.
 
 `install-with-rollback.ps1` is for a first install: it registers the Thessley provider and schedules `rollback.ps1` to remove only its registration after ten minutes by default. For an existing install, use `update-with-rollback.ps1`; it keeps the current provider DLL and QR viewer, schedules their restoration, and then switches to the new version. If correcting the files while that timer is already active, `refresh-existing-rollback.ps1` updates the files and leaves the current rollback untouched. After reaching the desktop and confirming QR sign-in, an administrator can run the installed `confirm.ps1` to cancel the timer. The built-in Windows PIN and password providers remain separate recovery choices. The provider writes lifecycle and enumeration results to `C:\ProgramData\ThessleyPamWin\credential-provider\provider.log`; it does not log usernames, passwords, QR payloads, or approval data. Do not cancel a rollback timer until a real sign-in has succeeded.
+
+### Wake-from-sleep behavior and LogonUI crashes
+
+After the computer wakes, Windows may show the sign-in screen before the selected phone-network adapter has re-associated or received its IPv4 address. The Thessley tile now shows a waiting message and waits up to three minutes for that adapter before starting the normal phone-approval window. This network wait is separate from the phone approval timeout. The phone listener binds on local IPv4 interfaces so a brief network reconnect does not leave its socket attached to a stale adapter state; Windows Firewall source scopes continue to control which networks can reach it.
+
+If Event Viewer reports `LogonUI.exe` failing in `ThessleyCredentialProvider-*.dll` with exception `0x40000015` (`STATUS_FATAL_APP_EXIT`), check the timestamp against `provider.log`. A credential worker previously could release its final COM reference on its own still-joinable `std::thread`, causing `std::terminate` and taking down LogonUI. The fixed provider transfers that release to a Windows worker-pool thread and records `ApprovalWorkerFinished`; a pool-queue failure is logged instead of crashing the sign-in process.
 
 To update only the QR viewer on an existing installation, rebuild it with
 `windows-logon-test/build.sh`. This produces both the desktop test app and

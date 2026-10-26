@@ -28,12 +28,13 @@ import socketserver
 import threading
 import time
 
-from . import approve, enroll, grants, machine, peer, qr, store, web
+from . import approve, drupal_agent, enroll, grants, machine, peer, qr, store, web
 from .listener import SharedListener
 
 HOST, PORT = "127.0.0.1", 47800
 MAX_REQUEST = 2048
 MAX_ACTIVE = 8          # approvals waiting at once
+LOGON_NETWORK_WAIT = 180  # let the selected adapter recover after sleep before starting the phone timer
 _log_lock = threading.Lock()
 
 
@@ -254,6 +255,39 @@ class Handler(socketserver.StreamRequestHandler):
 
         threading.Thread(target=watch, daemon=True).start()
 
+        # After resume, LogonUI can be ready before Wi-Fi has re-associated or
+        # DHCP has restored the configured adapter's address. Wait here so the
+        # phone approval timer does not start before its QR URL is reachable.
+        # The lock-screen request remains cancellable; normal Windows PIN and
+        # password recovery stays available if the network never returns.
+        deadline = time.monotonic() + LOGON_NETWORK_WAIT
+        next_notice = 0.0
+        phone_ip = None
+        while not cancel.is_set():
+            try:
+                candidate_ip = machine.lan_ip()
+                parsed_ip = ipaddress.ip_address(candidate_ip)
+                if not (parsed_ip.is_loopback or parsed_ip.is_link_local or parsed_ip.is_unspecified):
+                    phone_ip = str(parsed_ip)
+                    break
+                network_error = OSError("the selected phone network is not ready")
+            except (OSError, ValueError) as exc:
+                network_error = exc
+
+            now = time.monotonic()
+            if now >= deadline:
+                self._send({"say": "The phone network is still unavailable. Choose PIN or password, or select Thessley to retry."})
+                log(f"Windows unlock network did not become ready for {user!r}: {network_error!r}", True)
+                return False
+            if now >= next_notice:
+                if not self._send({"say": "Waiting for the phone network after wake. Approval starts when it is ready."}):
+                    cancel.set()
+                    return False
+                next_notice = now + 5
+            cancel.wait(1)
+        if cancel.is_set():
+            return False
+
         def say(line: str) -> None:
             if line.startswith("Link: "):
                 link = line[6:]
@@ -269,9 +303,17 @@ class Handler(socketserver.StreamRequestHandler):
             if not self._send({"say": line}):
                 cancel.set()
 
+        if drupal_agent.configured(user):
+            try:
+                return drupal_agent.run_login(user, say, cancel, log)
+            except drupal_agent.AgentError as exc:
+                self._send({"say": "Thessley Passkey: the distributed approval service is unavailable. Choose PIN or password, or retry."})
+                log(f"Drupal Windows approval refused for {user!r}: {exc}", True)
+                return False
+
         return approve.run(
             user, grants.LOCAL, "windows-logon", say, log, cancel=cancel,
-            use_pass=False, grant_pass=False, request_type="login",
+            ip=phone_ip, use_pass=False, grant_pass=False, request_type="login",
         )
 
     def _windows_logon_test(self, user: str, cancel: threading.Event) -> bool:

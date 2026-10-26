@@ -9,6 +9,8 @@ running as SYSTEM keeps the approvers and passes where a logged-in user cannot c
 
 Read [docs/SSH.md](docs/SSH.md) first: it explains the design, limits, remote SSH installation, phone enrollment, timed rollback,
 and what has and has not been tested.
+The opt-in distributed sign-in prototype that uses the Drupal Windows Access module is documented in
+[docs/WINDOWS-LOGON-PROTOTYPE.md](docs/WINDOWS-LOGON-PROTOTYPE.md); it is a development feature and is not part of the hosted installer yet.
 
 For a guided Windows 11 setup, extract this ZIP and run `guided-install.ps1` from an **Administrator PowerShell**. It
 installs the core service and offers the optional web page, firewall rules, per-user SSH QR gate, and experimental
@@ -40,6 +42,11 @@ scheduled task definitions. The last working app is kept under `C:\ProgramData\T
 passes, web settings and certificates remain outside the app directory. Dependencies are installed beside the app,
 not into machine-wide Python.
 
+The package also includes an opt-in development path for distributed Windows sign-in through the separate Thessley
+Windows Access Drupal module. It is disabled until an administrator creates a per-account agent key and completes the
+Drupal account/phone enrollment. See [docs/WINDOWS-LOGON-PROTOTYPE.md](docs/WINDOWS-LOGON-PROTOTYPE.md). The prototype uses
+a protected software key (not TPM-backed) and keeps the existing PIN/password recovery providers available.
+
 Automatic updates are enabled by default. A SYSTEM scheduled task checks every Sunday at 03:00 in the computer's local
 time. It downloads the published HTTPS bootstrap and ZIP, verifies the ZIP SHA-256 against the hash in that bootstrap,
 then runs the same staged installer and health check with firewall changes disabled. The installer retains the prior
@@ -64,6 +71,7 @@ while the wizard applies and tests the SSH gate.
 | `thessley_pam_win/store.py`, `grants.py` | approvers and passes under `C:\ProgramData\ThessleyPamWin` |
 | `thessley_pam_win/web.py` | the admin web page: sign in with an approval, manage your approvers, settings, activity ([docs/WEB.md](docs/WEB.md), has the Windows steps) |
 | `thessley_pam_win/enroll.py`, `peer.py` | adding an approver (shared by the admin tool and the service); finding out which Windows account is on the other end of a local connection |
+| `thessley_pam_win/drupal_agent.py` | opt-in distributed Windows sign-in prototype: pinned HTTPS, signed Drupal challenge/poll, and per-account agent key setup |
 | `thessley_pam_win/protocol.py` | **copied unchanged** from thessley-pam-linux (`05065e3`); keep byte-identical with the Android app |
 | `thessley_pam_win/listener.py` | exclusive-use HTTPS listeners for the web page and the daemon's shared, concurrent SSH approval listener |
 | `install/install.ps1`, `uninstall.ps1` | administrator scripts: service, folder permissions, optional firewall rule |
