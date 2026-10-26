@@ -307,6 +307,21 @@ class Handler(socketserver.StreamRequestHandler):
             if not self._send({"say": line}):
                 cancel.set()
 
+        # Credential Providers can briefly supply the account name before the
+        # SID is populated (for example during a cold LogonUI enumeration).
+        # For a local account, resolve that exact machine-local name back to
+        # its SID and use the enrolled SID-bound Drupal key when available.
+        # Never apply this inference to domain accounts or accept a mismatch
+        # when the provider did supply a SID.
+        if not sid and scope == "local":
+            try:
+                resolved_sid = drupal_agent._account_sid(user)
+            except drupal_agent.AgentError:
+                resolved_sid = ""
+            if resolved_sid and drupal_agent.configured_sid(resolved_sid):
+                sid = resolved_sid
+                log(f"Resolved local Windows login for {user!r} to its enrolled SID-bound Drupal key.")
+
         if sid and drupal_agent.configured_sid(sid):
             try:
                 return drupal_agent.run_login_v2(sid, context, say, cancel, log)
