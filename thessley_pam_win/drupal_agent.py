@@ -484,7 +484,18 @@ def _post(url: str, payload: dict, tls_sha256: str, timeout: float = 8.0) -> dic
         if response.status in (301, 302, 303, 307, 308):
             raise AgentError("Drupal redirected a signed request; refusing to follow it.")
         if response.status != 200:
-            raise AgentError(f"Drupal rejected the request (HTTP {response.status}).")
+            error_raw = response.read(16385)
+            message = ""
+            if len(error_raw) <= 16384:
+                try:
+                    error_body = json.loads(error_raw)
+                    candidate = error_body.get("message") if isinstance(error_body, dict) else None
+                    if isinstance(candidate, str):
+                        message = re.sub(r"[\x00-\x1f\x7f]", " ", candidate).strip()[:240]
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    pass
+            detail = f": {message}" if message else ""
+            raise AgentError(f"Drupal rejected the request (HTTP {response.status}){detail}.")
         raw = response.read(16385)
     except AgentError:
         raise
