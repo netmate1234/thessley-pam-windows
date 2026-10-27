@@ -247,6 +247,15 @@ def configured() -> bool:
         return False
 
 
+def check_connection() -> dict:
+    """Verify the pinned TLS connection and machine signature with the service."""
+    result = _signed_post("/thessley-ad/v1/machines/authenticate", {})
+    config, _key, _host, _port, _pin = _load()
+    if result.get("result") != "authenticated" or result.get("machine_id") != config["machine_id"]:
+        raise AgentError("The AD service did not confirm this machine identity.")
+    return result
+
+
 def _load() -> tuple[dict, ec.EllipticCurvePrivateKey, str, int, str]:
     folder = _folder()
     config_path = os.path.join(folder, "machine.json")

@@ -14,6 +14,7 @@ An administrator may use the same service to add a device for another account. B
     thessley-pam-win status                          is the approval service running, and what is set
     thessley-pam-win ad-enroll --server URL --tls-sha256 HASH   pair this PC with the standalone AD service
     thessley-pam-win ad-status                       show standalone AD machine pairing
+    thessley-pam-win ad-check                        verify pinned TLS and machine authentication
     thessley-pam-win sshd-config --user NAME [--factor password|key|key-password]
                                                     print a safe sshd_config block (QR approval always follows)
 """
@@ -302,6 +303,15 @@ def cmd_ad_status(_args) -> int:
     return 0
 
 
+def cmd_ad_check(_args) -> int:
+    try:
+        result = ad_agent.check_connection()
+    except (ad_agent.AgentError, OSError, ValueError) as exc:
+        sys.exit(f"Standalone AD service check failed: {exc}")
+    print(f"Standalone AD service authenticated this computer ({result['machine_id']}).")
+    return 0
+
+
 WEB_TASK = "ThessleyPamWinWeb"
 
 
@@ -505,6 +515,7 @@ def main(argv=None) -> int:
     ad.add_argument("--server", required=True, help="pinned HTTPS origin of the standalone AD service")
     ad.add_argument("--tls-sha256", required=True, help="64-character certificate fingerprint from the service")
     sub.add_parser("ad-status", help="show whether this computer is paired with the standalone AD service")
+    sub.add_parser("ad-check", help="verify pinned TLS and machine authentication with the standalone AD service")
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # the QR code is drawn with block characters
     a = p.parse_args(argv)
@@ -519,6 +530,7 @@ def main(argv=None) -> int:
         "drupal-enroll-v2": cmd_drupal_enroll_v2,
         "ad-enroll": cmd_ad_enroll,
         "ad-status": cmd_ad_status,
+        "ad-check": cmd_ad_check,
     }[a.cmd](a)
 
 

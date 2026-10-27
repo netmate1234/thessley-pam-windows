@@ -51,7 +51,8 @@ A separate AD lab prototype is being built for domain-joined Windows VMs. Its
 `ad-enroll` command pairs a PC with the standalone Thessley AD service using a
 one-time administrator code and a certificate-pinned HTTPS connection; the
 machine signing key is protected with Windows machine-scope DPAPI. `ad-status`
-shows the pairing. This does not use Drupal and does not yet enable AD sign-in:
+shows the pairing and `ad-check` verifies the pinned signed connection. This
+does not use Drupal and does not yet enable AD sign-in:
 the phone enrollment endpoint and Windows PKINIT certificate provider are
 still required. Do not use the existing password-backed tile as a substitute
 for passwordless AD authentication.
@@ -76,7 +77,7 @@ while the wizard applies and tests the SSH gate.
 | `thessley_pam_win/gate.py` | what sshd runs instead of the shell; asks the service, then starts the shell or command |
 | `thessley_pam_win/daemon.py` | the approval service (SYSTEM, `127.0.0.1:47800`) |
 | `thessley_pam_win/approve.py` | the approval flow: link, QR code, signed answer, passes |
-| `thessley_pam_win/cli.py` | `thessley-pam-win enroll / ad-enroll / ad-status / drupal-enroll / list / remove / grace / passes / status / sshd-config` |
+| `thessley_pam_win/cli.py` | `thessley-pam-win enroll / ad-enroll / ad-status / ad-check / drupal-enroll / list / remove / grace / passes / status / sshd-config` |
 | `thessley_pam_win/store.py`, `grants.py` | approvers and passes under `C:\ProgramData\ThessleyPamWin` |
 | `thessley_pam_win/web.py` | the admin web page: sign in with an approval, manage your approvers, settings, activity ([docs/WEB.md](docs/WEB.md), has the Windows steps) |
 | `thessley_pam_win/enroll.py`, `peer.py` | adding an approver (shared by the admin tool and the service); finding out which Windows account is on the other end of a local connection |
