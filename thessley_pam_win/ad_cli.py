@@ -46,13 +46,21 @@ def _sid_for_account(account: str) -> str:
 def _current_user_sid() -> str:
     script = (
         "$ErrorActionPreference='Stop'; "
-        "[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value"
+        "$identity=[System.Security.Principal.WindowsIdentity]::GetCurrent(); "
+        "$local=Get-CimInstance Win32_UserAccount -Filter 'LocalAccount=True' | "
+        "Where-Object { $_.SID -eq $identity.User.Value }; "
+        "if ($local) { 'LOCAL_ACCOUNT' } else { $identity.User.Value }"
     )
     result = subprocess.run(
         ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
         capture_output=True, text=True, errors="replace", timeout=15, check=False,
     )
     sid = result.stdout.strip()
+    if sid == "LOCAL_ACCOUNT":
+        raise ValueError(
+            "This is a local Windows account. Sign in to the domain account first, "
+            "or use enroll-phone --user DOMAIN\\name from an administrator shell."
+        )
     if result.returncode or not re.fullmatch(r"S-1-(?:[0-9]+-)+[0-9]+", sid, re.IGNORECASE):
         raise ValueError(result.stderr.strip()[:240] or "Windows could not resolve the signed-in account SID.")
     return sid
