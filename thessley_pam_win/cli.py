@@ -12,6 +12,8 @@ An administrator may use the same service to add a device for another account. B
     thessley-pam-win end-pass [--user NAME]          end passes at once
     thessley-pam-win self-enroll [on|off]            may an account with no approver enrol its first one itself
     thessley-pam-win status                          is the approval service running, and what is set
+    thessley-pam-win ad-enroll --server URL --tls-sha256 HASH   pair this PC with the standalone AD service
+    thessley-pam-win ad-status                       show standalone AD machine pairing
     thessley-pam-win sshd-config --user NAME [--factor password|key|key-password]
                                                     print a safe sshd_config block (QR approval always follows)
 """
@@ -27,7 +29,7 @@ import subprocess
 import sys
 import threading
 
-from . import drupal_agent, enroll, grants, machine, qr, ssh_policy, store
+from . import ad_agent, drupal_agent, enroll, grants, machine, qr, ssh_policy, store
 from .daemon import HOST, PORT
 from .gate import current_user
 
@@ -269,6 +271,37 @@ def cmd_drupal_enroll_v2(args) -> int:
     return 0
 
 
+def cmd_ad_enroll(args) -> int:
+    """Pair this Windows machine with the standalone AD service."""
+    _need_admin()
+    import getpass
+
+    code = getpass.getpass("One-time Thessley AD machine enrollment code: ").strip()
+    try:
+        machine_id = ad_agent.enroll_machine(args.server, args.tls_sha256, code)
+    except (ad_agent.AgentError, OSError, ValueError) as exc:
+        sys.exit(f"Windows machine enrollment was not confirmed: {exc}")
+    print(f"This Windows machine is paired with the standalone AD service ({machine_id}).")
+    print("The machine signing key is DPAPI protected and restricted to SYSTEM and local Administrators.")
+    print("This pairs the computer only; a domain account still needs its own phone enrollment and a Windows certificate sign-in provider.")
+    return 0
+
+
+def cmd_ad_status(_args) -> int:
+    if not ad_agent.configured():
+        print("This Windows machine is not paired with the standalone Thessley AD service.")
+        return 1
+    try:
+        config, _key, host, port, pin = ad_agent._load()
+    except ad_agent.AgentError as exc:
+        print(f"Standalone AD machine configuration needs repair: {exc}")
+        return 1
+    print(f"Standalone AD service: https://{host}:{port}")
+    print(f"Machine ID: {config['machine_id']}")
+    print(f"Certificate SHA-256: {pin}")
+    return 0
+
+
 WEB_TASK = "ThessleyPamWinWeb"
 
 
@@ -468,6 +501,10 @@ def main(argv=None) -> int:
     de2.add_argument("--server", required=True, help="HTTPS Drupal site origin")
     de2.add_argument("--tls-sha256", required=True, help="64-character certificate fingerprint from Drupal settings")
     de2.add_argument("--pair-code", required=True, help="eight-digit one-time code from the Drupal enrollment page")
+    ad = sub.add_parser("ad-enroll", help="pair this computer with the standalone Thessley AD service")
+    ad.add_argument("--server", required=True, help="pinned HTTPS origin of the standalone AD service")
+    ad.add_argument("--tls-sha256", required=True, help="64-character certificate fingerprint from the service")
+    sub.add_parser("ad-status", help="show whether this computer is paired with the standalone AD service")
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # the QR code is drawn with block characters
     a = p.parse_args(argv)
@@ -480,6 +517,8 @@ def main(argv=None) -> int:
         "drupal-setup": cmd_drupal_setup,
         "drupal-enroll": cmd_drupal_enroll,
         "drupal-enroll-v2": cmd_drupal_enroll_v2,
+        "ad-enroll": cmd_ad_enroll,
+        "ad-status": cmd_ad_status,
     }[a.cmd](a)
 
 

@@ -47,6 +47,15 @@ Windows Access Drupal module. It is disabled until an administrator creates a pe
 Drupal account/phone enrollment. See [docs/WINDOWS-LOGON-PROTOTYPE.md](docs/WINDOWS-LOGON-PROTOTYPE.md). The prototype uses
 a protected software key (not TPM-backed) and keeps the existing PIN/password recovery providers available.
 
+A separate AD lab prototype is being built for domain-joined Windows VMs. Its
+`ad-enroll` command pairs a PC with the standalone Thessley AD service using a
+one-time administrator code and a certificate-pinned HTTPS connection; the
+machine signing key is protected with Windows machine-scope DPAPI. `ad-status`
+shows the pairing. This does not use Drupal and does not yet enable AD sign-in:
+the phone enrollment endpoint and Windows PKINIT certificate provider are
+still required. Do not use the existing password-backed tile as a substitute
+for passwordless AD authentication.
+
 Automatic updates are enabled by default. A SYSTEM scheduled task checks every Sunday at 03:00 in the computer's local
 time. It downloads the published HTTPS bootstrap and ZIP, verifies the ZIP SHA-256 against the hash in that bootstrap,
 then runs the same staged installer and health check with firewall changes disabled. The installer retains the prior
@@ -67,11 +76,12 @@ while the wizard applies and tests the SSH gate.
 | `thessley_pam_win/gate.py` | what sshd runs instead of the shell; asks the service, then starts the shell or command |
 | `thessley_pam_win/daemon.py` | the approval service (SYSTEM, `127.0.0.1:47800`) |
 | `thessley_pam_win/approve.py` | the approval flow: link, QR code, signed answer, passes |
-| `thessley_pam_win/cli.py` | `thessley-pam-win enroll / drupal-enroll / drupal-enroll-v2 / list / remove / grace / passes / status / sshd-config` |
+| `thessley_pam_win/cli.py` | `thessley-pam-win enroll / ad-enroll / ad-status / drupal-enroll / list / remove / grace / passes / status / sshd-config` |
 | `thessley_pam_win/store.py`, `grants.py` | approvers and passes under `C:\ProgramData\ThessleyPamWin` |
 | `thessley_pam_win/web.py` | the admin web page: sign in with an approval, manage your approvers, settings, activity ([docs/WEB.md](docs/WEB.md), has the Windows steps) |
 | `thessley_pam_win/enroll.py`, `peer.py` | adding an approver (shared by the admin tool and the service); finding out which Windows account is on the other end of a local connection |
 | `thessley_pam_win/drupal_agent.py` | opt-in distributed Windows sign-in prototype: pinned HTTPS, signed Drupal challenge/poll, and per-account agent key setup |
+| `thessley_pam_win/ad_agent.py` | standalone AD machine pairing and signed, certificate-pinned machine requests; not yet connected to a sign-in credential provider |
 | `thessley_pam_win/protocol.py` | **copied unchanged** from thessley-pam-linux (`05065e3`); keep byte-identical with the Android app |
 | `thessley_pam_win/listener.py` | exclusive-use HTTPS listeners for the web page and the daemon's shared, concurrent SSH approval listener |
 | `install/install.ps1`, `uninstall.ps1` | administrator scripts: service, folder permissions, optional firewall rule |
