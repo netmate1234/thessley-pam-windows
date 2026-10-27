@@ -47,15 +47,24 @@ Windows Access Drupal module. It is disabled until an administrator creates a pe
 Drupal account/phone enrollment. See [docs/WINDOWS-LOGON-PROTOTYPE.md](docs/WINDOWS-LOGON-PROTOTYPE.md). The prototype uses
 a protected software key (not TPM-backed) and keeps the existing PIN/password recovery providers available.
 
-A separate AD lab prototype is being built for domain-joined Windows VMs. Its
-`ad-enroll` command pairs a PC with the standalone Thessley AD service using a
-one-time administrator code and a certificate-pinned HTTPS connection; the
-machine signing key is protected with Windows machine-scope DPAPI. `ad-status`
-shows the pairing and `ad-check` verifies the pinned signed connection. This
-does not use Drupal and does not yet enable AD sign-in:
-the phone enrollment endpoint and Windows PKINIT certificate provider are
-still required. Do not use the existing password-backed tile as a substitute
-for passwordless AD authentication.
+A separate AD sign-in path is being built for domain-joined Windows Pro and
+higher. The isolated `thessley-ad-test.cmd` prototype pairs a PC with the
+standalone Thessley AD service using a one-time administrator code and
+certificate-pinned HTTPS; the machine signing key is protected with
+Windows machine-scope DPAPI. Its `enroll-phone` command displays the AD phone
+enrollment QR and asks the operator to confirm the matching pairing code.
+`approval-test` checks phone approval without changing Windows credentials or
+providers. Neither command uses Drupal. The prototype runs from
+`C:\ProgramData\ThessleyPamWin\ad-prototype`, separate from the installed
+local-account app.
+
+The existing local-account Thessley sign-in tile remains a separate option and
+is unchanged by the AD work. It is the path to use on Windows Home, which does
+not support joining an Active Directory domain. Keep Windows PIN/password
+recovery available. The AD work is still a QR approval prototype: it does not
+yet turn that approval into a passwordless KDC/PKINIT credential. Do not use
+the existing password-backed tile as a substitute for passwordless AD
+authentication.
 
 Automatic updates are enabled by default. A SYSTEM scheduled task checks every Sunday at 03:00 in the computer's local
 time. It downloads the published HTTPS bootstrap and ZIP, verifies the ZIP SHA-256 against the hash in that bootstrap,

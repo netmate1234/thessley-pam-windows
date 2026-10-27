@@ -377,3 +377,77 @@ def poll_login(request_id: str, cancel, say=lambda _message: None, timeout: int 
         cancel.wait(1.0)
     say("Phone approval timed out.")
     return False
+
+
+def start_phone_enrollment(sid: str) -> dict:
+    """Create an Android phone-enrollment QR for an authorized domain SID."""
+    if not isinstance(sid, str) or not _SID.fullmatch(sid):
+        raise AgentError("The domain account SID is invalid.")
+    result = _signed_post("/thessley-ad/v1/enrollments", {"sid": sid.upper()})
+    request = result.get("request")
+    link = result.get("app_link")
+    if result.get("result") != "created" or not isinstance(request, dict) or not isinstance(link, str):
+        raise AgentError("The AD service did not return a valid phone enrollment request.")
+    config, _key, host, port, pin = _load()
+    request_id, nonce = request.get("request_id"), request.get("nonce")
+    principal_id = hashlib.sha256(sid.upper().encode("ascii")).hexdigest()
+    if (not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{8,128}", request_id)
+            or not isinstance(nonce, str) or not re.fullmatch(r"[A-Za-z0-9_-]{8,128}", nonce)
+            or request.get("machine_id") != config["machine_id"]
+            or request.get("principal_id") != principal_id
+            or request.get("principal_type") != "domain"
+            or request.get("context") != "enrollment"):
+        raise AgentError("The AD service returned an enrollment for a different machine or account.")
+    try:
+        parsed = urlsplit(link)
+        query = parse_qs(parsed.query, strict_parsing=True)
+    except ValueError as exc:
+        raise AgentError("The AD service returned a malformed phone link.") from exc
+    required = ("h", "p", "fp", "id", "n", "m", "hn", "u", "pv", "sid", "scope", "auth", "ctx", "api")
+    if (parsed.scheme != "thessleypam" or parsed.netloc != "enroll"
+            or any(len(query.get(name, [])) != 1 for name in required)
+            or query.get("api") != ["ad"] or query.get("pv") != ["2"]
+            or query.get("id") != [request_id] or query.get("n") != [nonce]
+            or query.get("m") != [config["machine_id"]] or query.get("sid") != [principal_id]
+            or query.get("scope") != ["domain"] or query.get("ctx") != ["enrollment"]
+            or query.get("fp", [""])[0].lower() != pin
+            or query.get("h", [""])[0].lower() != host.lower()
+            or query.get("p") != [str(port)]
+            or query.get("u") != [request.get("username")]
+            or query.get("auth") != [request.get("authority")]):
+        raise AgentError("The AD service returned a phone link with mismatched account or certificate details.")
+    return {"request_id": request_id, "link": link,
+            "qr_matrix": "/".join(qr.bitmap_rows(link, border=2)),
+            "username": request.get("username"), "authority": request.get("authority")}
+
+
+def phone_enrollment_status(request_id: str) -> dict:
+    if not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{8,128}", request_id):
+        raise AgentError("Invalid phone enrollment request id.")
+    result = _signed_post("/thessley-ad/v1/enrollments/status", {"request_id": request_id})
+    if result.get("status") not in ("pending", "ready", "confirmed", "expired", "denied"):
+        raise AgentError("The AD service returned an unknown phone enrollment state.")
+    if result.get("status") == "ready" and (
+            not isinstance(result.get("pairing_code"), str)
+            or not re.fullmatch(r"[0-9]{3} [0-9]{3}", result["pairing_code"])):
+        raise AgentError("The AD service returned an invalid phone pairing code.")
+    return result
+
+
+def confirm_phone_enrollment(request_id: str, pairing_code: str) -> None:
+    if (not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{8,128}", request_id)
+            or not isinstance(pairing_code, str) or not re.fullmatch(r"[0-9]{3} [0-9]{3}", pairing_code)):
+        raise AgentError("Invalid phone enrollment confirmation.")
+    result = _signed_post("/thessley-ad/v1/enrollments/confirm", {
+        "request_id": request_id, "pairing_code": pairing_code,
+    })
+    if result.get("result") != "confirmed":
+        raise AgentError("The AD service did not confirm phone enrollment.")
+
+
+def cancel_phone_enrollment(request_id: str) -> None:
+    if not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{8,128}", request_id):
+        raise AgentError("Invalid phone enrollment request id.")
+    result = _signed_post("/thessley-ad/v1/enrollments/cancel", {"request_id": request_id})
+    if result.get("result") not in ("cancelled", "error"):
+        raise AgentError("The AD service did not confirm cancellation.")
