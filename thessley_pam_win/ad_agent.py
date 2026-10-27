@@ -268,9 +268,20 @@ def _load() -> tuple[dict, ec.EllipticCurvePrivateKey, str, int, str]:
     except (OSError, ValueError, TypeError) as exc:
         raise AgentError("This Windows machine is not paired with the Thessley AD service.") from exc
     if (not isinstance(config, dict) or set(config) != {"version", "server_url", "tls_sha256", "machine_id", "machine_name"}
-            or config.get("version") != 1 or not _MACHINE_ID.fullmatch(str(config.get("machine_id", "")))):
+            or isinstance(config.get("version"), bool) or config.get("version") != 1
+            or not isinstance(config.get("server_url"), str)
+            or not isinstance(config.get("tls_sha256"), str)
+            or not isinstance(config.get("machine_id"), str)
+            or not _MACHINE_ID.fullmatch(config["machine_id"])
+            or not isinstance(config.get("machine_name"), str)
+            or not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", config["machine_name"])):
         raise AgentError("The local AD machine configuration is invalid.")
-    host, port, pin = _server(config["server_url"], config["tls_sha256"])
+    try:
+        host, port, pin = _server(config["server_url"], config["tls_sha256"])
+    except ValueError as exc:
+        raise AgentError("The local AD service URL or certificate pin is invalid.") from exc
+    if not protected_key or len(protected_key) > 64 * 1024:
+        raise AgentError("The protected AD machine key file is invalid.")
     try:
         private_der = _dpapi(protected_key, decrypt=True)
         key = serialization.load_der_private_key(private_der, password=None)
@@ -311,22 +322,25 @@ def start_login(sid: str, context: str) -> dict:
     link = result.get("app_link")
     if result.get("result") != "created" or not isinstance(request, dict) or not isinstance(link, str):
         raise AgentError("The AD service did not return a valid phone request.")
-    if request.get("principal_id") != principal_id or request.get("context") != context:
+    config, _key, host, port, pin = _load()
+    request_id = request.get("request_id")
+    nonce = request.get("nonce")
+    if (not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{8,128}", request_id)
+            or not isinstance(nonce, str) or not re.fullmatch(r"[A-Za-z0-9_-]{8,128}", nonce)
+            or request.get("machine_id") != config["machine_id"]
+            or request.get("principal_id") != principal_id or request.get("context") != context
+            or request.get("principal_type") != "domain"):
         raise AgentError("The AD service returned a request for a different account or sign-in context.")
     try:
         parsed = urlsplit(link)
         query = parse_qs(parsed.query, strict_parsing=True)
     except ValueError as exc:
         raise AgentError("The AD service returned a malformed phone link.") from exc
-    try:
-        config, _key, host, port, pin = _load()
-    except AgentError:
-        raise
     required = ("h", "p", "fp", "id", "n", "m", "hn", "u", "pv", "sid", "scope", "auth", "ctx", "api")
     if (parsed.scheme != "thessleypam" or parsed.netloc != "login"
             or any(len(query.get(name, [])) != 1 for name in required)
             or query.get("api") != ["ad"] or query.get("pv") != ["2"]
-            or query.get("id") != [request.get("request_id")]
+            or query.get("id") != [request_id]
             or query.get("sid") != [principal_id]
             or query.get("ctx") != [context]
             or query.get("m") != [config["machine_id"]]
@@ -334,11 +348,11 @@ def start_login(sid: str, context: str) -> dict:
             or query.get("h", [""])[0].lower() != host.lower()
             or query.get("p") != [str(port)]):
         raise AgentError("The AD service returned a phone link with mismatched machine, SID, or certificate details.")
-    for key, value in (("n", request.get("nonce")), ("u", request.get("username")),
+    for key, value in (("n", nonce), ("u", request.get("username")),
                        ("auth", request.get("authority")), ("scope", "domain")):
         if query.get(key) != [value]:
             raise AgentError("The AD service returned a phone link for a different account.")
-    return {"request_id": request["request_id"], "link": link,
+    return {"request_id": request_id, "link": link,
             "qr_matrix": "/".join(qr.bitmap_rows(link, border=2))}
 
 
