@@ -51,10 +51,12 @@ A separate AD sign-in path is being built for domain-joined Windows Pro and
 higher. The isolated `thessley-ad-test.cmd` prototype pairs a PC with the
 standalone Thessley AD service using a one-time administrator code and
 certificate-pinned HTTPS; the machine signing key is protected with
-Windows machine-scope DPAPI. Its `enroll-phone` command displays the AD phone
-enrollment QR and asks the operator to confirm the matching pairing code.
-`approval-test` checks phone approval without changing Windows credentials or
-providers. Neither command uses Drupal. The prototype runs from
+Windows machine-scope DPAPI. `enroll-current-user` enrolls the currently signed-in
+domain account without asking the user to type an account name; the service
+checks its AD group membership. Admin-assisted `enroll-phone --user` is also
+available. Both display the AD phone enrollment QR and require confirmation of
+the matching pairing code. `approval-test` checks phone approval without
+changing Windows credentials or providers. Neither command uses Drupal. The prototype runs from
 `C:\ProgramData\ThessleyPamWin\ad-prototype`, separate from the installed
 local-account app.
 
