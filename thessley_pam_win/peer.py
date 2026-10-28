@@ -86,6 +86,57 @@ def process_user(pid: int) -> str | None:
         kernel32.CloseHandle(process)
 
 
+def process_identity(pid: int) -> dict | None:
+    """Return the token SID and its resolved account authority for a process."""
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    advapi32.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+    advapi32.GetTokenInformation.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+                                             ctypes.POINTER(wintypes.DWORD)]
+    advapi32.LookupAccountSidW.argtypes = [wintypes.LPCWSTR, ctypes.c_void_p, wintypes.LPWSTR,
+                                           ctypes.POINTER(wintypes.DWORD), wintypes.LPWSTR,
+                                           ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(wintypes.DWORD)]
+    advapi32.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.LPWSTR)]
+    advapi32.ConvertSidToStringSidW.restype = wintypes.BOOL
+    process = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not process:
+        return None
+    token = wintypes.HANDLE()
+    sid_text = wintypes.LPWSTR()
+    try:
+        if not advapi32.OpenProcessToken(process, TOKEN_QUERY, ctypes.byref(token)):
+            return None
+        needed = wintypes.DWORD(0)
+        advapi32.GetTokenInformation(token, TOKEN_USER, None, 0, ctypes.byref(needed))
+        if not needed.value:
+            return None
+        buf = ctypes.create_string_buffer(needed.value)
+        if not advapi32.GetTokenInformation(token, TOKEN_USER, buf, needed, ctypes.byref(needed)):
+            return None
+        sid = ctypes.c_void_p.from_buffer(buf).value
+        if not sid or not advapi32.ConvertSidToStringSidW(sid, ctypes.byref(sid_text)):
+            return None
+
+        name, domain = ctypes.create_unicode_buffer(256), ctypes.create_unicode_buffer(256)
+        name_len, domain_len, use = wintypes.DWORD(256), wintypes.DWORD(256), wintypes.DWORD()
+        if not advapi32.LookupAccountSidW(None, sid, name, ctypes.byref(name_len), domain,
+                                         ctypes.byref(domain_len), ctypes.byref(use)):
+            return None
+        return {"sid": sid_text.value, "username": name.value, "authority": domain.value,
+                "sid_type": int(use.value)}
+    finally:
+        if sid_text:
+            kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+            kernel32.LocalFree.restype = ctypes.c_void_p
+            kernel32.LocalFree(sid_text)
+        if token:
+            kernel32.CloseHandle(token)
+        kernel32.CloseHandle(process)
+
+
 def client_user(client_address: tuple, server_port: int) -> str | None:
     """The account behind a connection that arrived from `client_address` (127.0.0.1, port) at `server_port`."""
     host, port = client_address[0], client_address[1]
@@ -93,6 +144,15 @@ def client_user(client_address: tuple, server_port: int) -> str | None:
         return None
     pid = owner_pid(port, server_port)
     return process_user(pid) if pid else None
+
+
+def client_identity(client_address: tuple, server_port: int) -> dict | None:
+    """Resolve the SID and account authority of a loopback client process."""
+    host, port = client_address[0], client_address[1]
+    if host != "127.0.0.1":
+        return None
+    pid = owner_pid(port, server_port)
+    return process_identity(pid) if pid else None
 
 
 def process_is_system(pid: int) -> bool | None:

@@ -22,13 +22,14 @@ user name in the request: it asks Windows which account owns the connection (pee
 import ipaddress
 import json
 import os
+import re
 import select
 import socket
 import socketserver
 import threading
 import time
 
-from . import approve, drupal_agent, enroll, grants, machine, peer, qr, store, web
+from . import ad_agent, approve, drupal_agent, enroll, grants, machine, peer, qr, store, web
 from .listener import SharedListener
 
 HOST, PORT = "127.0.0.1", 47800
@@ -94,16 +95,27 @@ class Handler(socketserver.StreamRequestHandler):
     def handle(self):
         try:
             req = json.loads(self.rfile.readline(MAX_REQUEST + 1))
-            assert isinstance(req, dict) and req.get("op") in (
-                "approve", "enroll", "admin-enroll", "web-approve", "web-enroll", "windows-logon", "windows-logon-test")
-            user = req["user"]
-            assert isinstance(user, str)
-            sid = req.get("sid", "")
-            scope = req.get("principal_type", "")
-            context = req.get("logon_context", "")
-            assert isinstance(sid, str) and isinstance(scope, str) and isinstance(context, str)
-            rhost = req.get("rhost") or grants.LOCAL
-            assert req["op"] in ("enroll", "windows-logon") or valid_rhost(rhost)
+            assert isinstance(req, dict)
+            op = req.get("op")
+            assert op in (
+                "approve", "enroll", "admin-enroll", "web-approve", "web-enroll",
+                "windows-logon", "windows-logon-test", "ad-ssh-approve")
+            if op == "ad-ssh-approve":
+                assert set(req) == {"op", "sid", "rhost"}
+                sid = req["sid"]
+                assert isinstance(sid, str) and re.fullmatch(r"S-1-(?:[0-9]+-)+[0-9]+", sid, re.IGNORECASE)
+                rhost = req["rhost"]
+                assert valid_rhost(rhost) and rhost != grants.LOCAL
+                user, scope, context = "", "domain", "ssh"
+            else:
+                user = req["user"]
+                assert isinstance(user, str)
+                sid = req.get("sid", "")
+                scope = req.get("principal_type", "")
+                context = req.get("logon_context", "")
+                assert isinstance(sid, str) and isinstance(scope, str) and isinstance(context, str)
+                rhost = req.get("rhost") or grants.LOCAL
+                assert op in ("enroll", "windows-logon") or valid_rhost(rhost)
         except Exception:
             self._send({"done": True, "ok": False, "error": "bad request"})
             return
@@ -126,6 +138,8 @@ class Handler(socketserver.StreamRequestHandler):
                 ok = self._windows_logon(user, cancel, sid, scope, context)
             elif req["op"] == "windows-logon-test":
                 ok = self._windows_logon_test(user, cancel)
+            elif req["op"] == "ad-ssh-approve":
+                ok = self._ad_ssh_approve(sid, rhost, cancel)
             else:
                 ok = self._enroll(user, cancel)
         except Exception as e:  # strict: any unexpected failure refuses
@@ -164,6 +178,59 @@ class Handler(socketserver.StreamRequestHandler):
 
         threading.Thread(target=watch, daemon=True).start()
         return approve.run(user, rhost, "ssh", self._say(cancel), log, cancel=cancel)
+
+    def _ad_ssh_approve(self, sid: str, rhost: str, cancel: threading.Event) -> bool:
+        """Phone-gate a domain SSH session using the SYSTEM-protected AD machine key."""
+        self.connection.settimeout(None)
+        identity = peer.client_identity(self.client_address, self.server.server_address[1])
+        if (not identity or identity.get("sid_type") != 1
+                or str(identity.get("sid", "")).casefold() != sid.casefold()
+                or not identity.get("authority")
+                or identity["authority"].casefold() == socket.gethostname().casefold()
+                or identity["authority"].casefold() in ("builtin", "nt authority", "nt service")):
+            self._send({"say": "Thessley AD SSH: caller identity check failed. Refusing."})
+            log("AD SSH approval refused because the SSH process token was not the requested domain user", True)
+            return False
+
+        if not ad_agent.configured():
+            self._send({"say": "Thessley AD SSH: this PC is not paired with the AD approval service. Refusing."})
+            log("AD SSH approval refused because this PC is not paired with the AD service", True)
+            return False
+
+        def watch():
+            try:
+                while self.connection.recv(1):
+                    pass
+            except OSError:
+                pass
+            cancel.set()
+
+        threading.Thread(target=watch, daemon=True).start()
+        try:
+            started = ad_agent.start_login(sid, "ssh")
+        except (ad_agent.AgentError, OSError, ValueError) as exc:
+            self._send({"say": "Thessley AD SSH: approval could not be started. Refusing."})
+            log(f"AD SSH request creation failed ({type(exc).__name__})", True)
+            return False
+
+        if not self._send({"say": "Scan this AD account SSH approval with Thessley Passkey."}) or not self._send(
+                {"qr_link": started["link"]}):
+            cancel.set()
+            return False
+        try:
+            approved = ad_agent.poll_login(
+                started["request_id"], cancel,
+                say=lambda message: self._send({"say": message}), timeout=120,
+            )
+        except (ad_agent.AgentError, OSError, ValueError) as exc:
+            self._send({"say": "Thessley AD SSH: approval check failed. Refusing."})
+            log(f"AD SSH approval polling failed ({type(exc).__name__})", True)
+            return False
+        if approved:
+            log(f"AD SSH phone approval succeeded from {rhost}")
+        else:
+            log(f"AD SSH phone approval denied or expired from {rhost}", True)
+        return approved
 
     def _web_approve(self, user: str, rhost: str, service: str, cancel: threading.Event) -> bool:
         """Serve web approvals from the daemon so all phones use its one shared HTTPS listener."""

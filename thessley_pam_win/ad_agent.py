@@ -314,7 +314,7 @@ def _signed_post(path: str, body: dict, timeout: float = 8.0) -> dict:
 
 def start_login(sid: str, context: str) -> dict:
     """Ask AD-backed service to authorize the selected domain SID and create a phone request."""
-    if not isinstance(sid, str) or not _SID.fullmatch(sid) or context not in ("interactive", "unlock"):
+    if not isinstance(sid, str) or not _SID.fullmatch(sid) or context not in ("interactive", "unlock", "ssh"):
         raise AgentError("The selected domain SID or Windows logon context is invalid.")
     principal_id = hashlib.sha256(sid.upper().encode("ascii")).hexdigest()
     result = _signed_post("/thessley-ad/v1/requests", {"sid": sid.upper(), "context": context})
@@ -367,7 +367,7 @@ def poll_login(request_id: str, cancel, say=lambda _message: None, timeout: int 
         result = _signed_post("/thessley-ad/v1/requests/result", {"request_id": request_id}, timeout=8.0)
         state = result.get("status")
         if state == "approved":
-            say("Phone approval verified. Windows certificate sign-in is not yet connected.")
+            say("Phone approval verified.")
             return True
         if state in ("denied", "expired", "consumed"):
             say("Phone approval was denied or expired.")

@@ -12,7 +12,7 @@
     3. stages and import-checks the program, then swaps it into C:\ProgramData\ThessleyPamWin\app and restores the
        previous application and scheduled tasks automatically if activation fails; locks the folder down (SYSTEM + Administrators
        write; everybody else may only read the program, and cannot see who is enrolled);
-    4. writes gate.cmd (what sshd will run) and thessley-pam-win.cmd (the admin tool);
+    4. writes gate.cmd (local-account SSH), ad-ssh-gate.cmd (opt-in AD-account SSH), and thessley-pam-win.cmd (the admin tool);
     5. creates a scheduled task that starts the service as SYSTEM at boot, and starts it.
 
   It does NOT change sshd_config, accounts or groups. -PreserveFirewall leaves every Windows Firewall rule untouched.
@@ -181,7 +181,7 @@ try {
     & $Python -I -c $verifyDeps
     if ($LASTEXITCODE -ne 0) { throw 'A staged dependency version failed verification. The live install was not changed.' }
 
-    foreach ($entry in @(@('daemon_main.py', 'daemon'), @('gate_main.py', 'gate'), @('cli_main.py', 'cli'), @('web_main.py', 'web'))) {
+    foreach ($entry in @(@('daemon_main.py', 'daemon'), @('gate_main.py', 'gate'), @('ad_ssh_gate_main.py', 'ad_ssh_gate_main'), @('cli_main.py', 'cli'), @('web_main.py', 'web'))) {
         @"
 import os
 import sys
@@ -197,7 +197,7 @@ raise SystemExit(main())
 
     $env:THESSLEY_STAGE = $stage
     $env:THESSLEY_VENDOR = Join-Path $stage 'vendor'
-    & $Python -I -c "import os,sys; sys.path.insert(0,os.environ['THESSLEY_VENDOR']); sys.path.insert(0,os.environ['THESSLEY_STAGE']); import thessley_pam_win.daemon,thessley_pam_win.web,thessley_pam_win.cli,thessley_pam_win.gate"
+    & $Python -I -c "import os,sys; sys.path.insert(0,os.environ['THESSLEY_VENDOR']); sys.path.insert(0,os.environ['THESSLEY_STAGE']); import thessley_pam_win.daemon,thessley_pam_win.web,thessley_pam_win.cli,thessley_pam_win.gate,thessley_pam_win.ad_ssh_gate_main"
     if ($LASTEXITCODE -ne 0) { throw 'The staged application failed its Python import check; the installed version is still running.' }
 
     icacls $stage /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
@@ -227,10 +227,13 @@ raise SystemExit(main())
     if ($serviceExisted) { Export-ScheduledTask -TaskName $task | Set-Content -LiteralPath (Join-Path $upgradeBackup 'service.xml') -Encoding Unicode }
     if ($webExisted) { Export-ScheduledTask -TaskName $webTask | Set-Content -LiteralPath (Join-Path $upgradeBackup 'web.xml') -Encoding Unicode }
     $gateLauncher = Join-Path $base 'gate.cmd'
+    $adSshGateLauncher = Join-Path $base 'ad-ssh-gate.cmd'
     $cliLauncher = Join-Path $base 'thessley-pam-win.cmd'
     $gateLauncherExisted = Test-Path -LiteralPath $gateLauncher -PathType Leaf
+    $adSshGateLauncherExisted = Test-Path -LiteralPath $adSshGateLauncher -PathType Leaf
     $cliLauncherExisted = Test-Path -LiteralPath $cliLauncher -PathType Leaf
     if ($gateLauncherExisted) { Copy-Item -LiteralPath $gateLauncher -Destination (Join-Path $upgradeBackup 'gate.cmd') }
+    if ($adSshGateLauncherExisted) { Copy-Item -LiteralPath $adSshGateLauncher -Destination (Join-Path $upgradeBackup 'ad-ssh-gate.cmd') }
     if ($cliLauncherExisted) { Copy-Item -LiteralPath $cliLauncher -Destination (Join-Path $upgradeBackup 'thessley-pam-win.cmd') }
     $action = New-ScheduledTaskAction -Execute $Python -Argument "-I -X utf8 `"$app\daemon_main.py`""
     $webAction = New-ScheduledTaskAction -Execute $Python -Argument "-I -X utf8 `"$app\web_main.py`""
@@ -272,8 +275,10 @@ raise SystemExit(main())
 
         $run = "`"$Python`" -I -X utf8"
         Set-Content -Encoding ascii -LiteralPath $gateLauncher -Value "@$run `"$app\gate_main.py`""
+        Set-Content -Encoding ascii -LiteralPath $adSshGateLauncher -Value "@$run `"$app\ad_ssh_gate_main.py`""
         Set-Content -Encoding ascii -LiteralPath $cliLauncher -Value "@$run `"$app\cli_main.py`" %*"
         icacls $gateLauncher /grant '*S-1-5-32-545:(RX)' | Out-Null
+        icacls $adSshGateLauncher /grant '*S-1-5-32-545:(RX)' | Out-Null
         icacls $cliLauncher /grant '*S-1-5-32-545:(RX)' | Out-Null
 
         Register-ScheduledTask -TaskName $task -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description 'Thessley Passkey approvals for ssh logins' -Force | Out-Null
@@ -313,6 +318,8 @@ raise SystemExit(main())
         if ($oldAppMoved -and (Test-Path -LiteralPath $previousApp)) { Move-Item -LiteralPath $previousApp -Destination $app -Force }
         if ($gateLauncherExisted) { Copy-Item -LiteralPath (Join-Path $upgradeBackup 'gate.cmd') -Destination $gateLauncher -Force }
         else { Remove-Item -LiteralPath $gateLauncher -Force -ErrorAction SilentlyContinue }
+        if ($adSshGateLauncherExisted) { Copy-Item -LiteralPath (Join-Path $upgradeBackup 'ad-ssh-gate.cmd') -Destination $adSshGateLauncher -Force }
+        else { Remove-Item -LiteralPath $adSshGateLauncher -Force -ErrorAction SilentlyContinue }
         if ($cliLauncherExisted) { Copy-Item -LiteralPath (Join-Path $upgradeBackup 'thessley-pam-win.cmd') -Destination $cliLauncher -Force }
         else { Remove-Item -LiteralPath $cliLauncher -Force -ErrorAction SilentlyContinue }
         if ($phoneInterfaceFileExisted) {
