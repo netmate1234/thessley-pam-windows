@@ -74,6 +74,13 @@ def main(env=None, out=None, address=(HOST, PORT), run=subprocess.call, sid=None
     out = gate.messages_stream(env) if out is None else out
     if hasattr(out, "reconfigure"):
         out.reconfigure(encoding="utf-8", errors="replace")
+    if not env.get("SSH_TTY"):
+        print(
+            "Thessley AD SSH: this approval needs an interactive terminal. "
+            "Reconnect with ssh -tt so Ctrl+C can cancel the QR request.",
+            file=out, flush=True,
+        )
+        return 1
     identity = peer.process_identity(os.getpid()) if sid is None else {"sid": sid}
     if not identity or not isinstance(identity.get("sid"), str):
         print("Thessley AD SSH: cannot identify this account. Refusing.", file=out, flush=True)
