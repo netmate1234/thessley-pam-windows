@@ -53,6 +53,7 @@ def ask_ad(sid: str, rhost: str, out, address=(HOST, PORT), timeout=WAIT_FOR_SER
                     rendered = qr.lines(link, border=2)
                     if rendered:
                         print("\n".join(rendered), file=out, flush=True)
+                        print(f"Phone approval link: {link}", file=out, flush=True)
                     else:
                         print(f"Open this approval link on your phone: {link}", file=out, flush=True)
                 if msg.get("done"):
