@@ -60,6 +60,30 @@ changing Windows credentials or providers. Neither command uses Drupal. The prot
 `C:\ProgramData\ThessleyPamWin\ad-prototype`, separate from the installed
 local-account app.
 
+Authenticated local administrators can open **AD users** in the Thessley web
+page navigation. The page requests a read-only directory snapshot through the
+paired, certificate-pinned Thessley AD service, listing accounts, enabled
+state, and whether each account is authorized by the service's configured AD
+group policy. Only an administrator-paired computer can make that signed
+request. The page does not create or modify directory accounts and does not
+show phone keys held by the AD service. Windows Home can host/view this page
+when its Thessley app is paired to the AD service; this does not add domain
+join or AD Windows sign-in support to Home.
+
+To pair a Home or Pro workstation, have an AD service administrator issue a
+one-time machine pairing code, then run this from an elevated PowerShell
+window on the workstation:
+
+```powershell
+& 'C:\ProgramData\ThessleyPamWin\thessley-pam-win.cmd' ad-enroll --server 'https://AD-SERVICE-HOST:47810' --tls-sha256 '64_CHARACTER_CERTIFICATE_FINGERPRINT'
+```
+
+The command prompts for the short-lived code without echoing it. The AD
+service host and fingerprint must come from its administrator. After pairing,
+open **AD users** in the local Thessley web GUI. The local administrator who
+signs into the GUI controls who can view the list; pairing does not grant that
+person AD rights or let the workstation change directory accounts.
+
 The existing local-account Thessley sign-in tile remains a separate option and
 is unchanged by the AD work. It is the path to use on Windows Home, which does
 not support joining an Active Directory domain. Keep Windows PIN/password

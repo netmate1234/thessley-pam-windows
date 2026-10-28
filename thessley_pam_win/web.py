@@ -48,7 +48,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
-from . import enroll, firewall, grants, machine, ssh_policy, store, update_task
+from . import ad_directory, enroll, firewall, grants, machine, ssh_policy, store, update_task
 
 TTY_LOGIN, TTY_CHANGE, TTY_DEVICE, TTY_INSTALL_APPROVAL = "web", "web-change", "add-device", "install-approval"
 
@@ -1037,6 +1037,7 @@ def page(title: str, body: str, nonce: str, session: Session | None = None, admi
         else:
             nav = ('<nav><a href="/keys">Your keys</a><a href="/log">Activity</a>'
                    + ('<a href="/admin">Admin</a>' if admin else "")
+                   + ('<a href="/ad-users">AD users</a>' if admin else "")
                    + f'<form method="post" action="/logout" style="display:inline"><input type="hidden" name="csrf" value="{esc(session.csrf)}">'
                      '<button>Sign out</button></form></nav>')
     who = f'<span class="dim">Signed in as {esc(session.user)}</span>' if session else ""
@@ -1209,6 +1210,41 @@ def passes_html(user: str, viewer: Session, devices: list[dict]) -> str:
                                 '<input type="hidden" name="all" value="1"><button class="danger">End all passes</button></form>')
     return ("<h2>Passes</h2><p class='dim'>After one approval, the same account from the same address is let in without asking "
             "your device again, for a few hours. End a pass to make the next login ask again.</p>" + body)
+
+
+def ad_users_page(snapshot: dict) -> str:
+    """Render the domain directory as mobile-friendly cards; this view is read-only."""
+    refresh = '<p><a class="btn small" href="/ad-users?refresh=1">Refresh directory</a></p>'
+    if not snapshot.get("ok"):
+        return ("<h2>Active Directory users</h2>" + refresh
+                + f"<div class='card'><p class='bad'>{esc(snapshot.get('message', 'The directory could not be read.'))}</p>"
+                "<p class='dim'>This list is queried from the domain controller when you open this page. It does not change AD accounts or group membership.</p></div>")
+
+    users = snapshot.get("users", [])
+    allowed_count = sum(1 for user in users if user.get("authorized"))
+    cards = []
+    for user in users:
+        state = "Enabled" if user.get("enabled") else "Disabled"
+        state_class = "ok" if user.get("enabled") else "dim"
+        allowed_badge = " <span class='ok'>Allowed by AD policy</span>" if user.get("authorized") else ""
+        upn = f"<div class='dim'>{esc(user['upn'])}</div>" if user.get("upn") else ""
+        cards.append(
+            "<div class='card'>"
+            f"<strong>{esc(user['name'])}</strong> <span class='{state_class}'>{state}</span>{allowed_badge}"
+            f"<div class='mono dim'>{esc(snapshot.get('domain', ''))}\\{esc(user['sam'])}</div>{upn}"
+            "</div>"
+        )
+    if not cards:
+        cards.append("<div class='card dim'>No user accounts were returned from the domain.</div>")
+    truncated = ("<p class='dim'>The list is capped at 1,000 accounts.</p>"
+                 if snapshot.get("truncated") else "")
+    return ("<h2>Active Directory users</h2>"
+            f"<p class='dim'>Domain: <code>{esc(snapshot.get('domain', ''))}</code> · {len(users)} accounts · "
+            f"{allowed_count} allowed by the configured AD policy</p>" + refresh
+            + "<div class='card'><p class='dim'>Read-only directory view fetched from the paired Thessley AD service. "
+            "The allowed badge reflects the service's current group policy. This page does not create users or change AD rights; "
+            "phone enrollment data is held by the separate Thessley AD service.</p></div>"
+            + truncated + "".join(cards))
 
 
 def key_details_html(rows: list[tuple[str, str]]) -> str:
@@ -1674,6 +1710,14 @@ def make_handler(app: WebApp):
                 flash, s.flash = s.flash, ""
                 listener_host = str(app.httpd.server_address[0]) if app.httpd is not None else ""
                 return self.html(200, "Admin", admin_page(s, flash, listener_host), s)
+            if route == "/ad-users":
+                s = self.need_session()
+                if s is None:
+                    return
+                if not is_admin(s.user):
+                    return self.html(403, "Not allowed", flash_html("Only administrators can view AD users."), s)
+                snapshot = ad_directory.directory_snapshot(refresh=query.get("refresh") == "1")
+                return self.html(200, "Active Directory users", ad_users_page(snapshot), s)
             self.html(404, "Not found", flash_html("There is nothing here."), s)
 
         def do_POST(self):  # noqa: N802

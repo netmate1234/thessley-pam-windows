@@ -33,6 +33,7 @@ from . import qr
 SERVICE_PORT = 47810
 MACHINE_SIGNATURE_DOMAIN = "thessley_ad_machine_v1"
 MAX_BODY = 64 * 1024
+MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 _MACHINE_ID = re.compile(r"^[a-f0-9]{32}$")
 _PIN = re.compile(r"^[a-f0-9]{64}$")
 _SID = re.compile(r"^S-1-(?:[0-9]+-)+[0-9]+$", re.IGNORECASE)
@@ -155,8 +156,8 @@ def _post(host: str, port: int, pin: str, path: str, body: dict,
     try:
         conn.request("POST", path, body=raw, headers=request_headers)
         response = conn.getresponse()
-        payload = response.read(MAX_BODY + 1)
-        if len(payload) > MAX_BODY:
+        payload = response.read(MAX_RESPONSE_BYTES + 1)
+        if len(payload) > MAX_RESPONSE_BYTES:
             raise AgentError("The AD service response is too large.")
         if response.status < 200 or response.status >= 300:
             try:
@@ -254,6 +255,31 @@ def check_connection() -> dict:
     if result.get("result") != "authenticated" or result.get("machine_id") != config["machine_id"]:
         raise AgentError("The AD service did not confirm this machine identity.")
     return result
+
+
+def directory_users() -> dict:
+    """Fetch the current bounded user list and authorization flags from the paired AD service."""
+    result = _signed_post("/thessley-ad/v1/directory/users", {}, timeout=25.0)
+    users = result.get("users")
+    domain = result.get("domain")
+    truncated = result.get("truncated")
+    if (result.get("result") != "listed" or not isinstance(users, list) or len(users) > 1000
+            or not isinstance(domain, str) or len(domain) > 256 or not isinstance(truncated, bool)):
+        raise AgentError("The AD service returned an invalid user directory response.")
+    clean = []
+    for user in users:
+        if not isinstance(user, dict):
+            raise AgentError("The AD service returned an invalid user directory response.")
+        sam, name, upn = user.get("sam"), user.get("name"), user.get("upn", "")
+        if (not isinstance(sam, str) or not sam or len(sam) > 64
+                or not isinstance(name, str) or len(name) > 256
+                or not isinstance(upn, str) or len(upn) > 256
+                or not isinstance(user.get("enabled"), bool)
+                or not isinstance(user.get("authorized"), bool)):
+            raise AgentError("The AD service returned an invalid user directory response.")
+        clean.append({"sam": sam, "name": name, "upn": upn,
+                      "enabled": user["enabled"], "authorized": user["authorized"]})
+    return {"domain": domain, "users": clean, "truncated": truncated}
 
 
 def _load() -> tuple[dict, ec.EllipticCurvePrivateKey, str, int, str]:
