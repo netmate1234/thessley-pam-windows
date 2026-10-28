@@ -112,9 +112,15 @@ try {
     [IO.File]::WriteAllText($config, $newText, [Text.UTF8Encoding]::new($false))
     $validation = & $sshd -t -f $config 2>&1
     if ($LASTEXITCODE -ne 0) { throw "sshd_config validation failed: $($validation -join ' ')" }
-    $effective = & $sshd -T -f $config -C "user=$account,host=localhost,addr=127.0.0.1" 2>&1
-    if ($LASTEXITCODE -ne 0 -or (($effective -join "`n") -notmatch '(?im)^forcecommand .*ad-ssh-gate\.cmd')) {
-        throw "sshd did not apply the AD QR gate to $Domain\$UserName."
+    # Windows OpenSSH's -T -C user=DOMAIN\user context fails to resolve some
+    # valid AD principals even though the same Match User rule works for an
+    # authenticated SSH session. Validate the complete config with -t, then
+    # verify the exact managed Match/ForceCommand block on disk; the guarded
+    # real SSH login is the final applicability check.
+    $written = [IO.File]::ReadAllText($config)
+    if (-not $written.Contains("Match User $account") -or
+        -not $written.Contains("ForceCommand $commandQuoted")) {
+        throw "The AD QR Match/ForceCommand block for $Domain\$UserName is missing from sshd_config."
     }
     Restart-Service sshd -Force
     if ((Get-Service sshd).Status -ne 'Running') { throw 'sshd did not return to Running.' }
