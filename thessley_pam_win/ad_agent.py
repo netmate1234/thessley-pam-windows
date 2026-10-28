@@ -270,16 +270,47 @@ def directory_users() -> dict:
     for user in users:
         if not isinstance(user, dict):
             raise AgentError("The AD service returned an invalid user directory response.")
-        sam, name, upn = user.get("sam"), user.get("name"), user.get("upn", "")
+        sam, sid, name, upn = user.get("sam"), user.get("sid"), user.get("name"), user.get("upn", "")
         if (not isinstance(sam, str) or not sam or len(sam) > 64
+                or not isinstance(sid, str) or not re.fullmatch(r"S-1-(?:[0-9]+-)+[0-9]+", sid)
                 or not isinstance(name, str) or len(name) > 256
                 or not isinstance(upn, str) or len(upn) > 256
                 or not isinstance(user.get("enabled"), bool)
                 or not isinstance(user.get("authorized"), bool)):
             raise AgentError("The AD service returned an invalid user directory response.")
-        clean.append({"sam": sam, "name": name, "upn": upn,
+        clean.append({"sam": sam, "sid": sid, "name": name, "upn": upn,
                       "enabled": user["enabled"], "authorized": user["authorized"]})
     return {"domain": domain, "users": clean, "truncated": truncated}
+
+
+def phone_keys() -> list[dict]:
+    """List active phone-key metadata attached to this workstation, without key material."""
+    result = _signed_post("/thessley-ad/v1/directory/phone-keys", {}, timeout=15.0)
+    keys = result.get("keys")
+    if result.get("result") != "listed" or not isinstance(keys, list) or len(keys) > 5000:
+        raise AgentError("The AD service returned an invalid phone-key listing.")
+    clean = []
+    for key in keys:
+        if not isinstance(key, dict):
+            raise AgentError("The AD service returned an invalid phone-key listing.")
+        credential, principal, label, enrolled = (key.get("credential_id"), key.get("principal_id"),
+                                                    key.get("label"), key.get("enrolled_at"))
+        if (not isinstance(credential, str) or not re.fullmatch(r"[A-Za-z0-9_-]{32,64}", credential)
+                or not isinstance(principal, str) or not re.fullmatch(r"[a-f0-9]{64}", principal)
+                or not isinstance(label, str) or not 1 <= len(label) <= 64
+                or isinstance(enrolled, bool) or not isinstance(enrolled, int) or enrolled < 0):
+            raise AgentError("The AD service returned an invalid phone-key listing.")
+        clean.append({"credential_id": credential, "principal_id": principal,
+                      "label": label, "enrolled_at": enrolled})
+    return clean
+
+
+def revoke_phone_key(credential_id: str) -> None:
+    if not isinstance(credential_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{32,64}", credential_id):
+        raise AgentError("Invalid phone-key id.")
+    result = _signed_post("/thessley-ad/v1/directory/phone-keys/revoke", {"credential_id": credential_id})
+    if result.get("result") != "revoked":
+        raise AgentError("The AD service did not revoke the phone key.")
 
 
 def _load() -> tuple[dict, ec.EllipticCurvePrivateKey, str, int, str]:

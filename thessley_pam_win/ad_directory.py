@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import re
 import threading
 import time
 
@@ -34,15 +36,29 @@ def _query() -> dict:
         if not isinstance(item, dict):
             continue
         sam, name, upn = item.get("sam"), item.get("name"), item.get("upn", "")
-        if not isinstance(sam, str) or not sam or len(sam) > 64 or not isinstance(name, str):
+        sid = item.get("sid")
+        if (not isinstance(sam, str) or not sam or len(sam) > 64 or not isinstance(name, str)
+                or not isinstance(sid, str) or not re.fullmatch(r"S-1-(?:[0-9]+-)+[0-9]+", sid)):
             continue
         if not isinstance(upn, str):
             upn = ""
-        checked.append({"sam": sam, "name": name[:256], "upn": upn[:256],
+        checked.append({"sam": sam, "sid": sid, "principal_id": hashlib.sha256(sid.encode("ascii", "strict")).hexdigest(),
+                        "name": name[:256], "upn": upn[:256],
                         "enabled": item.get("enabled") is True,
                         "authorized": item.get("authorized") is True})
+    try:
+        keys = ad_agent.phone_keys()
+        keys_available = True
+    except (ad_agent.AgentError, OSError, ValueError):
+        keys, keys_available = [], False
+    by_principal: dict[str, list[dict]] = {}
+    for key in keys:
+        by_principal.setdefault(key["principal_id"], []).append(key)
+    for user in checked:
+        user["keys"] = by_principal.get(user["principal_id"], [])
     return {"ok": True, "message": "", "domain": domain[:256],
-            "truncated": result.get("truncated") is True, "users": checked}
+            "truncated": result.get("truncated") is True, "users": checked,
+            "keys_available": keys_available}
 
 
 def directory_snapshot(refresh: bool = False) -> dict:

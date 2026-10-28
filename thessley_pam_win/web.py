@@ -53,6 +53,7 @@ from . import ad_directory, enroll, firewall, grants, machine, ssh_policy, store
 TTY_LOGIN, TTY_CHANGE, TTY_DEVICE, TTY_INSTALL_APPROVAL = "web", "web-change", "add-device", "install-approval"
 
 CRED_RE = re.compile(r"^c_[0-9a-f]{16}$")
+DOMAIN_SID_RE = re.compile(r"^S-1-(?:[0-9]+-)+[0-9]+$")
 ID_RE = re.compile(r"^[0-9a-f]{32}$")
 
 MAX_BODY = 8 * 1024
@@ -496,6 +497,64 @@ class WebApp:
 
         threading.Thread(target=work, daemon=True).start()
         return flow
+
+    def start_ad_enroll(self, sid: str, account: str, owner: str) -> Flow | None:
+        """Create a browser-owned AD phone enrollment after administrator step-up approval."""
+        flow = self._new_flow(Flow("ad_enroll", account, "Enroll an AD user's phone", owner=owner))
+        if flow is None:
+            return None
+
+        def work():
+            try:
+                from . import ad_agent
+                started = ad_agent.start_phone_enrollment(sid)
+                flow.link = started["link"]
+                flow.label = str(started.get("username") or account)
+                flow.state = "waiting"
+                deadline = time.monotonic() + 115
+                while time.monotonic() < deadline and not flow.cancel.is_set():
+                    result = ad_agent.phone_enrollment_status(started["request_id"])
+                    state = result.get("status")
+                    if state == "ready":
+                        flow.code = result["pairing_code"]
+                        flow.state = "confirm"
+                        if not flow.answered.wait(110):
+                            ad_agent.cancel_phone_enrollment(started["request_id"])
+                            flow.state = "timeout"
+                            return
+                        if flow.answer is True:
+                            ad_agent.confirm_phone_enrollment(started["request_id"], flow.code)
+                            flow.state = "done"
+                            self.log(f"web page: AD phone enrolled for {account} by {owner}", False)
+                        else:
+                            ad_agent.cancel_phone_enrollment(started["request_id"])
+                            flow.state = "refused"
+                        return
+                    if state in ("confirmed",):
+                        flow.state = "done"
+                        return
+                    if state in ("expired", "denied"):
+                        flow.state = "timeout" if state == "expired" else "refused"
+                        return
+                    flow.cancel.wait(1)
+                if not flow.cancel.is_set():
+                    ad_agent.cancel_phone_enrollment(started["request_id"])
+                    flow.state = "timeout"
+            except Exception as exc:
+                flow.say(f"AD phone enrollment failed: {exc}")
+                flow.state = "failed"
+
+        threading.Thread(target=work, daemon=True).start()
+        return flow
+
+    def change_revoke_ad_phone(self, account: str, credential_id: str):
+        def run():
+            from . import ad_agent, ad_directory
+            ad_agent.revoke_phone_key(credential_id)
+            ad_directory.directory_snapshot(refresh=True)
+            self.log(f"web page: AD phone key revoked for {account}", False)
+            return "/ad-users?refresh=1", f"Revoked a phone key for {account}."
+        return run
 
     def flow(self, fid: str) -> Flow | None:
         if not ID_RE.match(fid or ""):
@@ -1137,7 +1196,7 @@ async function tick() {
       }
       if (s.state === 'confirm') {
         live.append(el('p', 'Compare this code with the one on the new device:'), el('div', s.code, 'big'));
-        const f = document.createElement('form'); f.method = 'post'; f.action = '/enroll/' + id + '/confirm';
+        const f = document.createElement('form'); f.method = 'post'; f.action = %s + id + '/confirm';
         const h = document.createElement('input'); h.type = 'hidden'; h.name = 'csrf'; h.value = s.csrf; f.append(h);
         const row = el('div', '', 'row');
         for (const [v, t, c] of [['yes', 'The codes match', 'primary'], ['no', 'They differ', 'danger']]) {
@@ -1145,14 +1204,15 @@ async function tick() {
         }
         f.append(row); live.append(f);
       }
-      if (s.message) live.append(el('p', s.message, s.bad ? 'bad' : 'ok'), (() => { const a = el('a', 'Back', 'link'); a.href = '/'; return a; })());
+      if (s.message) live.append(el('p', s.message, s.bad ? 'bad' : 'ok'), (() => { const a = el('a', 'Back', 'link'); a.href = %s; return a; })());
     }
     if (s.state === 'refused' || s.state === 'timeout' || s.state === 'failed' || s.state === 'gone') again = false;
   } catch (e) {}
   if (again) setTimeout(tick, 1500);
 }
 tick();
-""" % json.dumps(flow.id)
+""" % (json.dumps(flow.id), json.dumps("/ad-enroll/" if flow.kind == "ad_enroll" else "/enroll/"),
+       json.dumps("/ad-users" if flow.kind == "ad_enroll" else "/"))
     return (f'<div class="card"><h2 style="margin-top:0">{esc(heading)}</h2><p class="dim">{esc(note)}</p>'
             f'<div id="live"><p class="dim">Getting the request ready…</p></div></div>'
             f'<script nonce="{esc(nonce)}">{script}</script>')
@@ -1212,8 +1272,8 @@ def passes_html(user: str, viewer: Session, devices: list[dict]) -> str:
             "your device again, for a few hours. End a pass to make the next login ask again.</p>" + body)
 
 
-def ad_users_page(snapshot: dict) -> str:
-    """Render the domain directory as mobile-friendly cards; this view is read-only."""
+def ad_users_page(snapshot: dict, session: Session) -> str:
+    """Render AD accounts, phone-key metadata and admin controls as mobile-friendly cards."""
     refresh = '<p><a class="btn small" href="/ad-users?refresh=1">Refresh directory</a></p>'
     if not snapshot.get("ok"):
         return ("<h2>Active Directory users</h2>" + refresh
@@ -1228,11 +1288,36 @@ def ad_users_page(snapshot: dict) -> str:
         state_class = "ok" if user.get("enabled") else "dim"
         allowed_badge = " <span class='ok'>Allowed by AD policy</span>" if user.get("authorized") else ""
         upn = f"<div class='dim'>{esc(user['upn'])}</div>" if user.get("upn") else ""
+        key_items = user.get("keys", [])
+        key_html = []
+        for key in key_items:
+            try:
+                enrolled = datetime.datetime.fromtimestamp(key.get("enrolled_at", 0)).strftime("%Y-%m-%d %H:%M")
+            except (OverflowError, OSError, TypeError, ValueError):
+                enrolled = "unknown date"
+            key_html.append(
+                "<div class='key-detail-row'><div><strong>" + esc(key.get("label", "Phone")) +
+                "</strong><div class='dim'>Added " + esc(enrolled) + " · this computer</div></div>" +
+                "<form method='post' action='/ad-users/revoke'><input type='hidden' name='csrf' value='" +
+                esc(session.csrf) + "'><input type='hidden' name='credential_id' value='" +
+                esc(key.get("credential_id", "")) + "'><input type='hidden' name='account' value='" +
+                esc(user.get("sam", "")) + "'><button class='danger small'>Revoke</button></form></div>")
+        key_content = ("".join(key_html) if key_html else
+                       "<span class='dim'>" + ("Could not load phone keys." if not snapshot.get("keys_available", True)
+                                               else "No phone keys on this computer.") + "</span>")
+        keys_block = ("<h3>Enrolled phone keys (" + str(len(key_items)) + ")</h3><div class='card'>" + key_content + "</div>")
+        if user.get("enabled") and user.get("authorized") and user.get("sid"):
+            enroll = ("<form method='post' action='/ad-users/enroll' class='row'><input type='hidden' name='csrf' value='" +
+                      esc(session.csrf) + "'><input type='hidden' name='sid' value='" + esc(user["sid"]) +
+                      "'><input type='hidden' name='account' value='" + esc(user.get("sam", "")) +
+                      "'><button class='primary small'>Enroll phone</button></form>")
+        elif not user.get("authorized"):
+            enroll = "<p class='dim'>Phone enrollment requires membership in the AD service's configured allowed group.</p>"
         cards.append(
             "<div class='card'>"
             f"<strong>{esc(user['name'])}</strong> <span class='{state_class}'>{state}</span>{allowed_badge}"
             f"<div class='mono dim'>{esc(snapshot.get('domain', ''))}\\{esc(user['sam'])}</div>{upn}"
-            "</div>"
+            + enroll + keys_block + "</div>"
         )
     if not cards:
         cards.append("<div class='card dim'>No user accounts were returned from the domain.</div>")
@@ -1241,9 +1326,10 @@ def ad_users_page(snapshot: dict) -> str:
     return ("<h2>Active Directory users</h2>"
             f"<p class='dim'>Domain: <code>{esc(snapshot.get('domain', ''))}</code> · {len(users)} accounts · "
             f"{allowed_count} allowed by the configured AD policy</p>" + refresh
-            + "<div class='card'><p class='dim'>Read-only directory view fetched from the paired Thessley AD service. "
-            "The allowed badge reflects the service's current group policy. This page does not create users or change AD rights; "
-            "phone enrollment data is held by the separate Thessley AD service.</p></div>"
+            + "<div class='card'><p class='dim'>Directory accounts come from Active Directory. Phone keys are stored by the paired Thessley AD service and scoped to this computer. "
+            "Enrolling or revoking a key asks for a fresh approval from your administrator account. Private key material is never shown here.</p>"
+            + ("<p class='bad'>Phone-key inventory is temporarily unavailable. Update the paired AD service and Windows app to view keys.</p>" if not snapshot.get("keys_available", True) else "")
+            + "</div>"
             + truncated + "".join(cards))
 
 
@@ -1679,6 +1765,17 @@ def make_handler(app: WebApp):
                     return self.html(404, "Not found", flash_html("That request is no longer here."), s)
                 return self.html(200, "Add a device", wait_page(f, "{NONCE}", s, "Add a device",
                                  "Scan the code with the new device's Thessley Passkey app, or open the link on the new app."), s)
+            m = re.fullmatch(r"/ad-enroll/([0-9a-f]{32})", route)
+            if m:
+                s = self.need_session()
+                if s is None:
+                    return
+                f = self.flow_for(m.group(1), s)
+                if f is None or f.kind != "ad_enroll" or not is_admin(s.user):
+                    return self.html(404, "Not found", flash_html("That request is no longer here."), s)
+                return self.html(200, "Enroll AD phone", wait_page(f, "{NONCE}", s,
+                                 f"Enroll phone for {f.user}",
+                                 "Scan with Thessley Passkey. Compare the phone code below before confirming."), s)
             if route == "/keys":
                 s = self.need_session()
                 if s is None:
@@ -1717,7 +1814,7 @@ def make_handler(app: WebApp):
                 if not is_admin(s.user):
                     return self.html(403, "Not allowed", flash_html("Only administrators can view AD users."), s)
                 snapshot = ad_directory.directory_snapshot(refresh=query.get("refresh") == "1")
-                return self.html(200, "Active Directory users", ad_users_page(snapshot), s)
+                return self.html(200, "Active Directory users", ad_users_page(snapshot, s), s)
             self.html(404, "Not found", flash_html("There is nothing here."), s)
 
         def do_POST(self):  # noqa: N802
@@ -1785,6 +1882,50 @@ def make_handler(app: WebApp):
                     return self.html(503, "Busy", flash_html("Enrollment could not start. Try again."), s)
                 s.bootstrap_flow_id = flow.id
                 return self.redirect(f"/wait/{flow.id}")
+            if route == "/ad-users/enroll":
+                if not is_admin(s.user):
+                    return self.html(403, "Not allowed", flash_html("Only administrators can enroll AD users."), s)
+                sid, account = (data.get("sid") or "").strip(), (data.get("account") or "").strip()
+                if not DOMAIN_SID_RE.fullmatch(sid) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", account):
+                    return self.html(400, "Not valid", flash_html("Choose an AD account from the directory list."), s)
+                snapshot = ad_directory.directory_snapshot(refresh=True)
+                selected = next((u for u in snapshot.get("users", []) if u.get("sid", "").upper() == sid.upper()
+                                 and u.get("sam", "").casefold() == account.casefold()), None)
+                if not snapshot.get("ok") or not selected or not selected.get("enabled") or not selected.get("authorized"):
+                    return self.html(403, "Not allowed", flash_html("This AD account is unavailable or not allowed to enroll under the configured AD policy."), s)
+                def begin_ad_enrollment():
+                    flow = app.start_ad_enroll(sid, f"{snapshot.get('domain', '')}\\{account}", s.user)
+                    if flow is None:
+                        raise ValueError("too many requests are active; try again shortly")
+                    return f"/ad-enroll/{flow.id}", ""
+                return self.start_change(s, f"starting AD phone enrollment for {snapshot.get('domain', '')}\\{account}",
+                                         begin_ad_enrollment, TTY_DEVICE)
+            if route == "/ad-users/revoke":
+                if not is_admin(s.user):
+                    return self.html(403, "Not allowed", flash_html("Only administrators can revoke AD phone keys."), s)
+                account, credential = (data.get("account") or "").strip(), (data.get("credential_id") or "").strip()
+                if (not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", account)
+                        or not re.fullmatch(r"[A-Za-z0-9_-]{32,64}", credential)):
+                    return self.html(400, "Not valid", flash_html("Choose an AD phone key from the directory list."), s)
+                snapshot = ad_directory.directory_snapshot(refresh=True)
+                selected = next((u for u in snapshot.get("users", [])
+                                 if u.get("sam", "").casefold() == account.casefold()), None)
+                known = {key.get("credential_id") for key in (selected or {}).get("keys", [])}
+                if not snapshot.get("ok") or credential not in known:
+                    return self.html(404, "Not found", flash_html("That active phone key was not found for this AD account on this computer."), s)
+                return self.start_change(s, f"revoking an AD phone key for {snapshot.get('domain', '')}\\{account}",
+                                         app.change_revoke_ad_phone(f"{snapshot.get('domain', '')}\\{account}", credential),
+                                         TTY_DEVICE)
+            m = re.fullmatch(r"/ad-enroll/([0-9a-f]{32})/confirm", route)
+            if m:
+                if not is_admin(s.user):
+                    return self.html(403, "Not allowed", flash_html("Only administrators can confirm AD enrollment."), s)
+                f = self.flow_for(m.group(1), s)
+                if f is None or f.kind != "ad_enroll" or f.state != "confirm":
+                    return self.redirect("/ad-users")
+                f.answer = data.get("answer") == "yes"
+                f.answered.set()
+                return self.redirect(f"/ad-enroll/{f.id}")
             m = re.fullmatch(r"/enroll/([0-9a-f]{32})/confirm", route)
             if m:
                 f = self.flow_for(m.group(1), s)
@@ -1995,7 +2136,7 @@ def make_handler(app: WebApp):
                 if s is not None:
                     s.flash = flash
                 out.update(next=url or "/keys")
-            elif f.kind == "enroll" and f.state == "confirm":
+            elif f.kind in ("enroll", "ad_enroll") and f.state == "confirm":
                 out["csrf"] = s.csrf if s else ""
             elif f.state == "refused":
                 out.update(message="It was refused or denied. Nothing was changed.", bad=True)
@@ -2013,6 +2154,10 @@ def make_handler(app: WebApp):
                     out.update(next="/keys" if f.user == s.user else f"/keys?user={f.user}")
                 else:
                     out.update(next="/keys")
+            elif f.state == "done" and f.kind == "ad_enroll":
+                if s is not None:
+                    s.flash = f"Phone enrolled for {f.user}."
+                out.update(next="/ad-users?refresh=1")
             self.json(out, extra)
 
     return Handler
