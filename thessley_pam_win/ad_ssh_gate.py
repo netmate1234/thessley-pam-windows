@@ -68,11 +68,11 @@ def ask_ad(sid: str, rhost: str, out, address=(HOST, PORT), timeout=WAIT_FOR_SER
                 link = msg.get("qr_link")
                 if isinstance(link, str) and len(link) <= 4096 and link.startswith("thessleypam://"):
                     rendered = qr.lines(link, border=2)
+                    print(f"Phone approval link: {link}", file=out, flush=True)
                     if rendered:
                         print("\n".join(rendered), file=out, flush=True)
-                        print(f"Phone approval link: {link}", file=out, flush=True)
                     else:
-                        print(f"Open this approval link on your phone: {link}", file=out, flush=True)
+                        print("QR rendering is unavailable; use the approval link above.", file=out, flush=True)
                 if msg.get("done"):
                     return msg.get("ok") is True
     except KeyboardInterrupt:
