@@ -20,10 +20,11 @@ $base = Join-Path $env:ProgramData 'ThessleyPamWin'
 $config = Join-Path $env:ProgramData 'ssh\sshd_config'
 $sshd = Join-Path $env:WINDIR 'System32\OpenSSH\sshd.exe'
 $forceCommand = Join-Path $base 'ad-ssh-gate.cmd'
+$pythonGate = Join-Path $base 'app\ad_ssh_gate_main.py'
 $taskName = "ThessleyADSSHConfigRollback-$($Domain)-$($UserName)"
 if (-not (Test-Path -LiteralPath $sshd -PathType Leaf)) { throw 'OpenSSH Server is not installed.' }
 if (-not (Test-Path -LiteralPath $config -PathType Leaf)) { throw "OpenSSH config is missing: $config" }
-if (-not (Test-Path -LiteralPath $forceCommand -PathType Leaf)) { throw 'Update/install Thessley Passkey first; ad-ssh-gate.cmd is missing.' }
+if (-not (Test-Path -LiteralPath $forceCommand -PathType Leaf) -or -not (Test-Path -LiteralPath $pythonGate -PathType Leaf)) { throw 'Update/install Thessley Passkey first; the AD SSH gate is missing.' }
 if (-not (Get-ScheduledTask -TaskName 'ThessleyPamWin' -ErrorAction SilentlyContinue)) {
     throw 'The Thessley SYSTEM approval service is not installed.'
 }
@@ -34,16 +35,16 @@ if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
 $original = [IO.File]::ReadAllText($config)
 $newline = if ($original.Contains("`r`n")) { "`r`n" } else { "`n" }
 $account = "$($Domain.ToLowerInvariant())\$($UserName.ToLowerInvariant())"
-$existingMatchPattern = '(?im)^\s*Match\s+User\s+.*' + [regex]::Escape($account)
-if ($original -match $existingMatchPattern) {
-    throw "sshd_config already contains a Match User rule for $Domain\$UserName; merge it manually."
-}
+$launcherText = [IO.File]::ReadAllText($forceCommand)
+$pythonMatch = [regex]::Match($launcherText, '"([^"\r\n]+python\.exe)"', [Text.RegularExpressions.RegexOptions]::IgnoreCase)
+if (-not $pythonMatch.Success) { throw 'Could not determine the installed Python executable from ad-ssh-gate.cmd.' }
+$python = $pythonMatch.Groups[1].Value
 $lines = [regex]::Split($original, "\r?\n")
 $firstMatch = -1
 for ($i = 0; $i -lt $lines.Length; $i++) {
     if ($lines[$i] -match '^\s*Match\s+') { $firstMatch = $i; break }
 }
-$commandQuoted = '"' + $forceCommand.Replace('"', '\"') + '"'
+$commandQuoted = '"' + $python.Replace('"', '\"') + '" -I -X utf8 "' + $pythonGate.Replace('"', '\"') + '"'
 $block = @(
     "# BEGIN THESSLEY AD SSH QR $account",
     "Match User $account",
@@ -53,7 +54,30 @@ $block = @(
     "    ForceCommand $commandQuoted",
     "# END THESSLEY AD SSH QR $account"
 )
-if ($firstMatch -ge 0) {
+$markerStart = "# BEGIN THESSLEY AD SSH QR $account"
+$markerEnd = "# END THESSLEY AD SSH QR $account"
+$managedStarts = @(); $managedEnds = @()
+for ($i = 0; $i -lt $lines.Length; $i++) {
+    if ($lines[$i] -ceq $markerStart) { $managedStarts += $i }
+    if ($lines[$i] -ceq $markerEnd) { $managedEnds += $i }
+}
+if ($managedStarts.Count -or $managedEnds.Count) {
+    if ($managedStarts.Count -ne 1 -or $managedEnds.Count -ne 1 -or $managedEnds[0] -le $managedStarts[0]) {
+        throw "The existing Thessley AD SSH block for $Domain\$UserName is malformed; sshd_config was not changed."
+    }
+    $start = $managedStarts[0]; $end = $managedEnds[0]
+    $managed = @($lines[$start..$end])
+    if (-not ($managed | Where-Object { $_ -ceq "Match User $account" })) {
+        throw "The existing Thessley AD SSH block does not match $Domain\$UserName; sshd_config was not changed."
+    }
+    $forceLines = @()
+    for ($i = $start + 1; $i -lt $end; $i++) { if ($lines[$i] -match '^\s*ForceCommand\s+') { $forceLines += $i } }
+    if ($forceLines.Count -ne 1) { throw 'The existing Thessley AD SSH block must contain exactly one ForceCommand; sshd_config was not changed.' }
+    $lines[$forceLines[0]] = "    ForceCommand $commandQuoted"
+    $newLines = $lines
+} elseif ($original -match ('(?im)^\s*Match\s+User\s+.*' + [regex]::Escape($account))) {
+    throw "sshd_config already contains an unmanaged Match User rule for $Domain\$UserName; merge it manually."
+} elseif ($firstMatch -ge 0) {
     $newLines = @()
     if ($firstMatch -gt 0) { $newLines += $lines[0..($firstMatch - 1)] }
     $newLines += $block
