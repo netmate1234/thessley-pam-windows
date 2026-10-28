@@ -14,6 +14,7 @@ import re
 import socket
 import subprocess
 import sys
+import time
 
 from . import gate, peer, qr
 
@@ -40,11 +41,27 @@ def ask_ad(sid: str, rhost: str, out, address=(HOST, PORT), timeout=WAIT_FOR_SER
         print("Thessley AD SSH: approval service unavailable. Refusing.", file=out, flush=True)
         return False
     try:
-        sock.settimeout(timeout)
+        # Windows socket reads can delay Python's Ctrl+C handling for the
+        # entire socket timeout. Poll in short intervals so KeyboardInterrupt
+        # is handled promptly while the phone approval is pending.
+        sock.settimeout(0.5)
+        deadline = time.monotonic() + timeout
         request = {"op": "ad-ssh-approve", "sid": sid, "rhost": rhost}
         sock.sendall((json.dumps(request, separators=(",", ":")) + "\n").encode("utf-8"))
-        with sock.makefile("r", encoding="utf-8") as lines:
-            for raw in lines:
+        pending = bytearray()
+        while time.monotonic() < deadline:
+            try:
+                chunk = sock.recv(4096)
+            except socket.timeout:
+                continue
+            if not chunk:
+                break
+            pending.extend(chunk)
+            while b"\n" in pending:
+                raw, _, remainder = pending.partition(b"\n")
+                pending = bytearray(remainder)
+                if not raw:
+                    continue
                 msg = json.loads(raw)
                 if "say" in msg:
                     print(str(msg["say"]), file=out, flush=True)
