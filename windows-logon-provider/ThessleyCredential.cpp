@@ -16,6 +16,7 @@
 #include <ws2tcpip.h>
 #include <unknwn.h>
 #include <sddl.h>
+#include <cwchar>
 #include <string>
 #include <vector>
 #include <sstream>
@@ -75,6 +76,36 @@ static HRESULT WindowsAccountNameFromSid(PCWSTR sidText, std::wstring &accountNa
     accountName.assign(name.data());
     LocalFree(sid);
     return accountName.empty() ? HRESULT_FROM_WIN32(ERROR_NONE_MAPPED) : S_OK;
+}
+
+// The user-array provider ID is not a reliable local-vs-domain boundary:
+// Windows can report Identity_LocalUserProvider for a domain profile. The
+// qualified identity name gives us the authority Windows will log on against.
+// This provider is for local machine accounts (and Microsoft-account-backed
+// local profiles); domain identities must use the separate AD provider.
+static bool IsLocalQrAccount(PCWSTR qualifiedUserName)
+{
+    if (!qualifiedUserName || !*qualifiedUserName) return false;
+
+    const wchar_t *separator = wcschr(qualifiedUserName, L'\\');
+    if (!separator || separator == qualifiedUserName || !separator[1]) return false;
+
+    // Windows also represents an explicitly local account as .\\user.
+    if (separator == qualifiedUserName + 1 && qualifiedUserName[0] == L'.')
+        return true;
+
+    const int authorityLength = static_cast<int>(separator - qualifiedUserName);
+    if (authorityLength == 16 && CompareStringOrdinal(
+            qualifiedUserName, authorityLength, L"MicrosoftAccount", 16, TRUE) == CSTR_EQUAL)
+        return true;
+
+    wchar_t computerName[MAX_COMPUTERNAME_LENGTH + 1] = {};
+    DWORD computerNameLength = ARRAYSIZE(computerName);
+    if (!GetComputerNameW(computerName, &computerNameLength)) return false;
+
+    return CompareStringOrdinal(qualifiedUserName, authorityLength,
+                               computerName, static_cast<int>(computerNameLength),
+                               TRUE) == CSTR_EQUAL;
 }
 
 static std::wstring RenderQr(const std::string &matrix)
@@ -528,9 +559,7 @@ HRESULT CSampleCredential::Initialize(CREDENTIAL_PROVIDER_USAGE_SCENARIO cpus,
     HRESULT hr = S_OK;
     _cpus = cpus;
 
-    GUID guidProvider;
-    pcpUser->GetProviderID(&guidProvider);
-    _fIsLocalUser = (guidProvider == Identity_LocalUserProvider);
+    _fIsLocalUser = false;
 
     // Copy the field descriptors for each field. This is useful if you want to vary the field
     // descriptors based on what Usage scenario the credential was created for.
@@ -589,6 +618,12 @@ HRESULT CSampleCredential::Initialize(CREDENTIAL_PROVIDER_USAGE_SCENARIO cpus,
     if (SUCCEEDED(hr))
     {
         hr = pcpUser->GetStringValue(PKEY_Identity_QualifiedUserName, &_pszQualifiedUserName);
+        if (SUCCEEDED(hr))
+        {
+            _fIsLocalUser = IsLocalQrAccount(_pszQualifiedUserName);
+            ProviderDiag(L"LocalAccountCheck", S_OK, _fIsLocalUser ? 1 : 0);
+            if (!_fIsLocalUser) hr = E_ACCESSDENIED;
+        }
     }
     if (SUCCEEDED(hr))
     {
