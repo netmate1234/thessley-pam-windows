@@ -305,6 +305,32 @@ def phone_keys() -> list[dict]:
     return clean
 
 
+def resolve_principal(sid: str) -> dict:
+    """Recheck current AD enablement and workstation-group authorization for a SID."""
+    if not isinstance(sid, str) or not _SID.fullmatch(sid):
+        raise AgentError("The domain account SID is invalid.")
+    sid = sid.upper()
+    result = _signed_post("/thessley-ad/v1/principals/resolve", {"sid": sid}, timeout=15.0)
+    principal = result.get("principal")
+    expected_id = hashlib.sha256(sid.encode("ascii")).hexdigest()
+    if (result.get("result") != "resolved" or not isinstance(principal, dict)
+            or principal.get("sid") != sid or principal.get("principal_id") != expected_id
+            or principal.get("principal_type") != "domain"
+            or not isinstance(principal.get("authority"), str)
+            or not principal["authority"] or len(principal["authority"]) > 256
+            or not isinstance(principal.get("username"), str)
+            or not principal["username"] or len(principal["username"]) > 64
+            or not isinstance(result.get("authorized"), bool)):
+        raise AgentError("The AD service returned an invalid principal authorization.")
+    return {
+        "sid": sid,
+        "principal_id": expected_id,
+        "authority": principal["authority"],
+        "username": principal["username"],
+        "authorized": result["authorized"],
+    }
+
+
 def revoke_phone_key(credential_id: str) -> None:
     if not isinstance(credential_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{32,64}", credential_id):
         raise AgentError("Invalid phone-key id.")
@@ -410,30 +436,36 @@ def start_login(sid: str, context: str) -> dict:
         if query.get(key) != [value]:
             raise AgentError("The AD service returned a phone link for a different account.")
     return {"request_id": request_id, "link": link,
+            "principal_id": principal_id,
+            "username": request["username"],
+            "authority": request["authority"],
             "qr_matrix": "/".join(qr.bitmap_rows(link, border=2))}
 
 
-def poll_login(request_id: str, cancel, say=lambda _message: None, timeout: int = 95) -> bool:
-    """Poll a one-use machine-bound AD approval result. Does not perform Windows logon."""
+def poll_login(request_id: str, cancel, say=lambda _message: None, timeout: int = 95) -> str | None:
+    """Poll a one-use machine-bound AD approval; return the approving phone key ID."""
     if not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{8,128}", request_id):
         raise AgentError("Invalid AD sign-in request id.")
     deadline = time.monotonic() + max(1, min(int(timeout), 120))
     while time.monotonic() < deadline:
         if cancel.is_set():
-            return False
+            return None
         result = _signed_post("/thessley-ad/v1/requests/result", {"request_id": request_id}, timeout=8.0)
         state = result.get("status")
         if state == "approved":
+            credential_id = result.get("credential_id")
+            if not isinstance(credential_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{32,64}", credential_id):
+                raise AgentError("The AD service did not identify the approving phone key.")
             say("Phone approval verified.")
-            return True
+            return credential_id
         if state in ("denied", "expired", "consumed"):
             say("Phone approval was denied or expired.")
-            return False
+            return None
         if state != "pending":
             raise AgentError("The AD service returned an unknown sign-in status.")
         cancel.wait(1.0)
     say("Phone approval timed out.")
-    return False
+    return None
 
 
 def start_phone_enrollment(sid: str) -> dict:

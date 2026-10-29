@@ -253,6 +253,19 @@ class PassTests(Base):
         self.assertIsNone(grants.valid("alice", "9.9.9.9", {"c_x"}, now=1000 + 4 * 3600 + 1))
         self.assertIsNone(grants.valid("alice", "9.9.9.9", {"c_other"}, now=1000))
 
+    def test_domain_pass_is_distinct_and_rechecked_against_active_phone_keys(self):
+        self._with_grace(4)
+        sid_hash = "a" * 64
+        now = time.time()
+        grants.add(sid_hash, "192.168.1.50", 4, "credential_active",
+                   now=now, display_user="THESSLEYLAB\\martin")
+        self.assertIsNotNone(grants.valid(sid_hash, "192.168.1.50", {"credential_active"}, now=now + 1))
+        self.assertIsNone(grants.valid(sid_hash, "192.168.1.50", set(), now=now + 1))
+        self.assertIsNone(grants.valid(sid_hash, "192.168.1.51", {"credential_active"}, now=now + 1))
+        self.assertEqual(grants.all_passes()[0]["display_user"], "THESSLEYLAB\\martin")
+        self.assertEqual(grants.revoke("martin"), 1)
+        self.assertEqual(grants.all_passes(), [])
+
     def test_grace_is_capped_and_off_by_default(self):
         store.ensure_dirs()
         self.assertEqual(grants.grace_hours(), 0.0)

@@ -1373,11 +1373,14 @@ def log_page(rows: list[tuple[str, str]], who: str, page_number: int = 1, everyo
 
 def admin_page(viewer: Session, flash: str, listener_host: str = "") -> str:
     grace_h = grants.grace_hours()
+    grace_scope = "any client IP" if grants.grace_any_ip() else "the same client IP"
     on = lambda flag: "on" if flag else "off"  # noqa: E731
     hidden = f'<input type="hidden" name="csrf" value="{esc(viewer.csrf)}">'
     first = grants.self_enroll_first()
     grace = (f'<div class="card"><strong>How long one approval counts</strong>: {grace_h:g} h'
-             f'<div class="dim">After one approval, logins from the same address need no new one for this long. 0 means every login asks.</div>'
+             f'<div class="dim">After one approval, SSH logins from {esc(grace_scope)} need no new one for this long. '
+             'This covers local and AD accounts using the Thessley SSH controls; AD authorization and the phone key are checked again on each login. '
+             '0 means every login asks.</div>'
              f'<form method="post" action="/admin/set" class="row">{hidden}<input type="hidden" name="name" value="grace">'
              f'<input type="text" name="value" value="{grace_h:g}" style="width:6rem"> hours <button>Change</button></form></div>')
     toggle = (f'<div class="card"><strong>Users may enrol their own first approver</strong>: <span class="{"ok" if first else "bad"}">{on(first)}</span>'

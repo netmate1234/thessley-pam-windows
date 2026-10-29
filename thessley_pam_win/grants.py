@@ -463,12 +463,18 @@ def valid(username: str, rhost: str, active_credentials, now: float | None = Non
     return None
 
 
-def add(username: str, rhost: str, hours: float, credential: str, now: float | None = None) -> dict:
+def add(username: str, rhost: str, hours: float, credential: str, now: float | None = None,
+        display_user: str | None = None) -> dict:
     """Record an approval. An earlier pass for the same user and place is replaced."""
     now = time.time() if now is None else now
     rhost = rhost or LOCAL
     hours = min(max(float(hours), 0.0), MAX_HOURS)
     entry = {"rhost": rhost, "credential": credential, "approved_at": int(now), "expires_at": int(now + hours * 3600)}
+    if display_user is not None:
+        if (not isinstance(display_user, str) or not display_user.strip() or len(display_user) > 256
+                or any(ord(char) < 32 or ord(char) == 127 for char in display_user)):
+            raise ValueError("Invalid pass display name.")
+        entry["display_user"] = display_user.strip()
     items = [i for i in _live(_load(username), now) if i.get("rhost") != rhost]
     items.append(entry)
     _save(username, items)
@@ -506,7 +512,20 @@ def revoke_one(username: str, rhost: str) -> int:
 def revoke(username: str | None = None) -> int:
     """End passes (all of a user's, or everyone's). Returns how many ended."""
     ended = 0
-    users = [username] if username else sorted({p["user"] for p in all_passes()})
+    if username:
+        normalized = store.normalize_user(username)
+        users = {normalized}
+        requested = str(username).strip().casefold()
+        for item in all_passes():
+            display = item.get("display_user")
+            if not isinstance(display, str):
+                continue
+            short_display = display.rsplit("\\", 1)[-1].split("@", 1)[0].casefold()
+            if display.casefold() == requested or short_display == normalized:
+                users.add(item["user"])
+        users = sorted(users)
+    else:
+        users = sorted({p["user"] for p in all_passes()})
     for name in users:
         ended += len(_load(name))
         _save(name, [])

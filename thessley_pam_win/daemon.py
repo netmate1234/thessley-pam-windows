@@ -180,7 +180,7 @@ class Handler(socketserver.StreamRequestHandler):
         return approve.run(user, rhost, "ssh", self._say(cancel), log, cancel=cancel)
 
     def _ad_ssh_approve(self, sid: str, rhost: str, cancel: threading.Event) -> bool:
-        """Phone-gate a domain SSH session using the SYSTEM-protected AD machine key."""
+        """Phone-gate AD SSH, reusing the configured short-lived pass when still valid."""
         self.connection.settimeout(None)
         identity = peer.client_identity(self.client_address, self.server.server_address[1])
         if (not identity or identity.get("sid_type") != 1
@@ -196,6 +196,30 @@ class Handler(socketserver.StreamRequestHandler):
             self._send({"say": "Thessley AD SSH: this PC is not paired with the AD approval service. Refusing."})
             log("AD SSH approval refused because this PC is not paired with the AD service", True)
             return False
+
+        grace = grants.grace_hours()
+        pass_rhost = "*" if grants.grace_any_ip() else rhost
+        if grace > 0:
+            try:
+                principal = ad_agent.resolve_principal(sid)
+                if not principal["authorized"]:
+                    self._send({"say": "Thessley AD SSH: this account is no longer authorized on this computer. Refusing."})
+                    log(f"AD SSH approval refused because {principal['authority']}\\{principal['username']} is no longer authorized", True)
+                    return False
+                active_credentials = {
+                    key["credential_id"] for key in ad_agent.phone_keys()
+                    if key["principal_id"] == principal["principal_id"]
+                }
+            except (ad_agent.AgentError, OSError, ValueError) as exc:
+                self._send({"say": "Thessley AD SSH: could not verify current AD access and phone keys. Refusing."})
+                log(f"AD SSH authorization/pass check failed ({type(exc).__name__})", True)
+                return False
+            held = grants.valid(principal["principal_id"], pass_rhost, active_credentials)
+            if held:
+                remaining = grants.remaining(held)
+                self._send({"say": f"Thessley AD SSH: approved earlier; this login is covered ({remaining} remain)."})
+                log(f"AD SSH pass used for {principal['authority']}\\{principal['username']} from {rhost} ({remaining} remain)")
+                return True
 
         def watch():
             try:
@@ -218,7 +242,7 @@ class Handler(socketserver.StreamRequestHandler):
             cancel.set()
             return False
         try:
-            approved = ad_agent.poll_login(
+            approving_credential = ad_agent.poll_login(
                 started["request_id"], cancel,
                 say=lambda message: self._send({"say": message}), timeout=120,
             )
@@ -226,11 +250,22 @@ class Handler(socketserver.StreamRequestHandler):
             self._send({"say": "Thessley AD SSH: approval check failed. Refusing."})
             log(f"AD SSH approval polling failed ({type(exc).__name__})", True)
             return False
-        if approved:
-            log(f"AD SSH phone approval succeeded from {rhost}")
-        else:
+        if not approving_credential:
             log(f"AD SSH phone approval denied or expired from {rhost}", True)
-        return approved
+            return False
+
+        if grace > 0:
+            display_user = f"{started['authority']}\\{started['username']}"
+            try:
+                grants.add(started["principal_id"], pass_rhost, grace, approving_credential,
+                           display_user=display_user)
+                scope = "any client IP" if grants.grace_any_ip() else rhost
+                self._send({"say": f"Approved. Your next SSH login from {scope} needs no approval for {grace:g} h."})
+                log(f"AD SSH pass granted to {display_user} (from {scope}, {grace:g} h)")
+            except (OSError, ValueError) as exc:
+                log(f"could not record the AD SSH pass for {display_user}: {exc}", True)
+        log(f"AD SSH phone approval succeeded from {rhost}")
+        return True
 
     def _web_approve(self, user: str, rhost: str, service: str, cancel: threading.Event) -> bool:
         """Serve web approvals from the daemon so all phones use its one shared HTTPS listener."""

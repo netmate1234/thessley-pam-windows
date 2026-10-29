@@ -48,6 +48,11 @@ address during the window skips the approval. Behind a shared (NAT) address that
 the window short; `thessley-pam-win end-pass` ends passes at once. Fresh installs start at 4 hours; change the value
 in Admin or with `thessley-pam-win grace --hours H`. Set it to 0 to ask for approval on every login.
 
+The same duration and IP scope apply to AD accounts using the Thessley AD SSH gate. Their pass is keyed by the SID hash,
+so a same-named local account has a separate pass. Before reusing an AD pass, the service rechecks current AD group
+authorization and confirms the approving phone key remains active. These checks fail closed if the AD service cannot
+be reached. A pass does not extend when reused.
+
 ### Limits to know about
 
 - The gate protects the shell and the commands. Port forwarding, agent and X11 forwarding are switched off for the account

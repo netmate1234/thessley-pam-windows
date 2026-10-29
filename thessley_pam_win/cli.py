@@ -179,7 +179,8 @@ def cmd_passes(args) -> int:
     if not live:
         print("No passes.")
     for p in live:
-        print(f"{p['user']:<16} from {p['rhost']:<18} {grants.remaining(p)} left   (approved by {p['credential']})")
+        username = p.get("display_user") or p["user"]
+        print(f"{username:<32} from {p['rhost']:<18} {grants.remaining(p)} left   (approved by {p['credential']})")
     return 0
 
 
