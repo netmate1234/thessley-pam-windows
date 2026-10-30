@@ -33,8 +33,33 @@ def ssh_client_address(env) -> str | None:
         return None
 
 
-def ask_ad(sid: str, rhost: str, out, address=(HOST, PORT), timeout=WAIT_FOR_SERVICE) -> bool:
-    """Request a SID-bound AD SSH approval; all ambiguous outcomes refuse."""
+SCP_COMMAND = re.compile(r"(?i)^\s*scp(?:\.exe)?(?:\s+-[A-Za-z0-9]+)*\s+-[tf](?:\s|$)")
+SHELL_METACHARACTERS = re.compile(r"[&|<>^%;`$\x00-\x1f\x7f]")
+
+
+SFTP_SUBSYSTEM = re.compile(r"(?i)^\s*sftp-server(?:\.exe)?(?:\s+-[A-Za-z](?:\s+[\w.-]+)?)*\s*$")
+SFTP_ANY = re.compile(r"(?i)^\s*(?:internal-sftp|sftp-server(?:\.exe)?)(?:\s|$)")
+
+
+def is_scp_command(original: str) -> bool:
+    """True for the remote side of scp (`scp -t` receiving, `scp -f` sending) with nothing a shell could chain onto it."""
+    return bool(SCP_COMMAND.match(original)) and not SHELL_METACHARACTERS.search(original)
+
+
+def is_sftp_command(original: str) -> bool:
+    """True for the SFTP subsystem command sshd hands a ForceCommand (`sftp-server.exe`, optionally with plain flags).
+    `internal-sftp` is not accepted: only sshd itself can run it, not a command started by this gate."""
+    return bool(SFTP_SUBSYSTEM.match(original)) and not SHELL_METACHARACTERS.search(original)
+
+
+def is_file_transfer_command(original: str) -> bool:
+    return is_scp_command(original) or is_sftp_command(original)
+
+
+def ask_ad(sid: str, rhost: str, out, address=(HOST, PORT), timeout=WAIT_FOR_SERVICE, pass_only: bool = False) -> bool:
+    """Request a SID-bound AD SSH approval; all ambiguous outcomes refuse.
+
+    `pass_only` asks the service to accept an unexpired pass and otherwise refuse, never to start a phone request."""
     try:
         sock = socket.create_connection(address, timeout=5)
     except OSError:
@@ -47,6 +72,8 @@ def ask_ad(sid: str, rhost: str, out, address=(HOST, PORT), timeout=WAIT_FOR_SER
         sock.settimeout(0.5)
         deadline = time.monotonic() + timeout
         request = {"op": "ad-ssh-approve", "sid": sid, "rhost": rhost}
+        if pass_only:
+            request["pass_only"] = True
         sock.sendall((json.dumps(request, separators=(",", ":")) + "\n").encode("utf-8"))
         pending = bytearray()
         while time.monotonic() < deadline:
@@ -91,7 +118,11 @@ def main(env=None, out=None, address=(HOST, PORT), run=subprocess.call, sid=None
     out = gate.messages_stream(env) if out is None else out
     if hasattr(out, "reconfigure"):
         out.reconfigure(encoding="utf-8", errors="replace")
-    if not env.get("SSH_TTY"):
+    original = env.get("SSH_ORIGINAL_COMMAND") or ""
+    # Without a terminal there is nowhere to show the QR code or take Ctrl+C, so a phone request is never started. scp
+    # (and SFTP) may still go through when an earlier approval, a pass, is valid for this account and client address.
+    pass_only = not env.get("SSH_TTY")
+    if pass_only and not is_file_transfer_command(original):
         print(
             "Thessley AD SSH: this approval needs an interactive terminal. "
             "Reconnect with ssh -tt so Ctrl+C can cancel the QR request.",
@@ -106,11 +137,11 @@ def main(env=None, out=None, address=(HOST, PORT), run=subprocess.call, sid=None
     if rhost is None:
         print("Thessley AD SSH: SSH client address is unavailable. Refusing.", file=out, flush=True)
         return 1
-    original = env.get("SSH_ORIGINAL_COMMAND") or ""
-    if re.match(r"(?i)^\s*(?:internal-sftp|sftp-server(?:\.exe)?)(?:\s|$)", original):
-        print("Thessley AD SSH: SFTP sessions are not supported by this gate. Refusing.", file=out, flush=True)
+    if SFTP_ANY.match(original) and not (pass_only and is_sftp_command(original)):
+        print("Thessley AD SSH: SFTP sessions are only supported without a terminal, using an earlier approval. Refusing.",
+              file=out, flush=True)
         return 1
-    if not ask_ad(identity["sid"], rhost, out, address):
+    if not ask_ad(identity["sid"], rhost, out, address, pass_only=pass_only):
         return 1
     return run(gate.shell_command(gate.default_shell(), original))
 

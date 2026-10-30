@@ -101,7 +101,8 @@ class Handler(socketserver.StreamRequestHandler):
                 "approve", "enroll", "admin-enroll", "web-approve", "web-enroll",
                 "windows-logon", "windows-logon-test", "ad-ssh-approve")
             if op == "ad-ssh-approve":
-                assert set(req) == {"op", "sid", "rhost"}
+                assert set(req) in ({"op", "sid", "rhost"}, {"op", "sid", "rhost", "pass_only"})
+                assert req.get("pass_only", False) is True or "pass_only" not in req
                 sid = req["sid"]
                 assert isinstance(sid, str) and re.fullmatch(r"S-1-(?:[0-9]+-)+[0-9]+", sid, re.IGNORECASE)
                 rhost = req["rhost"]
@@ -139,7 +140,7 @@ class Handler(socketserver.StreamRequestHandler):
             elif req["op"] == "windows-logon-test":
                 ok = self._windows_logon_test(user, cancel)
             elif req["op"] == "ad-ssh-approve":
-                ok = self._ad_ssh_approve(sid, rhost, cancel)
+                ok = self._ad_ssh_approve(sid, rhost, cancel, req.get("pass_only") is True)
             else:
                 ok = self._enroll(user, cancel)
         except Exception as e:  # strict: any unexpected failure refuses
@@ -179,8 +180,11 @@ class Handler(socketserver.StreamRequestHandler):
         threading.Thread(target=watch, daemon=True).start()
         return approve.run(user, rhost, "ssh", self._say(cancel), log, cancel=cancel)
 
-    def _ad_ssh_approve(self, sid: str, rhost: str, cancel: threading.Event) -> bool:
-        """Phone-gate AD SSH, reusing the configured short-lived pass when still valid."""
+    def _ad_ssh_approve(self, sid: str, rhost: str, cancel: threading.Event, pass_only: bool = False) -> bool:
+        """Phone-gate AD SSH, reusing the configured short-lived pass when still valid.
+
+        `pass_only` (a session without a terminal, i.e. scp or SFTP) accepts a valid pass and otherwise refuses without
+        starting a phone request."""
         self.connection.settimeout(None)
         identity = peer.client_identity(self.client_address, self.server.server_address[1])
         if (not identity or identity.get("sid_type") != 1
@@ -220,6 +224,14 @@ class Handler(socketserver.StreamRequestHandler):
                 self._send({"say": f"Thessley AD SSH: approved earlier; this login is covered ({remaining} remain)."})
                 log(f"AD SSH pass used for {principal['authority']}\\{principal['username']} from {rhost} ({remaining} remain)")
                 return True
+
+        if pass_only:
+            self._send({"say": (
+                "Thessley AD SSH: scp and SFTP need an approval from earlier. Log in once with ssh -tt, approve on the "
+                "phone, then retry within the pass length." if grace > 0 else
+                "Thessley AD SSH: scp and SFTP need a pass, and passes are switched off on this computer. Refusing.")})
+            log(f"AD SSH file transfer refused for {rhost}: no valid pass", False)
+            return False
 
         def watch():
             try:
