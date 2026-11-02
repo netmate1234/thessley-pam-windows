@@ -133,7 +133,12 @@ if (Test-Path -LiteralPath $register) {
     Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal | Out-Null
 }
 
+# One phone approval covers later logins from the same client IP for four hours.
+$cli = Join-Path $base 'thessley-pam-win.cmd'
+if (Test-Path -LiteralPath $cli) { & $cli grace --hours 4 | Out-Null }
+
 Write-Output 'AD QR SSH approval enabled for every account except the local Administrator.'
+Write-Output 'One approval now covers SSH logins from the same client IP for 4 hours.'
 Write-Output "Config backup: $backup"
 Write-Output "Automatic rollback in $RollbackMinutes minutes. Test a fresh SSH login as a domain account, then keep it with:"
 Write-Output "  Unregister-ScheduledTask -TaskName '$taskName' -Confirm:`$false"
