@@ -283,9 +283,12 @@ def directory_users() -> dict:
     return {"domain": domain, "users": clean, "truncated": truncated}
 
 
-def phone_keys() -> list[dict]:
-    """List active phone-key metadata attached to this workstation, without key material."""
-    result = _signed_post("/thessley-ad/v1/directory/phone-keys", {}, timeout=15.0)
+def phone_keys(principal_id: str | None = None) -> list[dict]:
+    """List active phone-key metadata, optionally scoped to one principal usable on this workstation."""
+    if principal_id is not None and not re.fullmatch(r"[a-f0-9]{64}", principal_id):
+        raise AgentError("The AD principal ID for phone-key lookup is invalid.")
+    body = {} if principal_id is None else {"principal_id": principal_id}
+    result = _signed_post("/thessley-ad/v1/directory/phone-keys", body, timeout=15.0)
     keys = result.get("keys")
     if result.get("result") != "listed" or not isinstance(keys, list) or len(keys) > 5000:
         raise AgentError("The AD service returned an invalid phone-key listing.")
@@ -298,7 +301,8 @@ def phone_keys() -> list[dict]:
         if (not isinstance(credential, str) or not re.fullmatch(r"[A-Za-z0-9_-]{32,64}", credential)
                 or not isinstance(principal, str) or not re.fullmatch(r"[a-f0-9]{64}", principal)
                 or not isinstance(label, str) or not 1 <= len(label) <= 64
-                or isinstance(enrolled, bool) or not isinstance(enrolled, int) or enrolled < 0):
+                or isinstance(enrolled, bool) or not isinstance(enrolled, int) or enrolled < 0
+                or (principal_id is not None and principal != principal_id)):
             raise AgentError("The AD service returned an invalid phone-key listing.")
         clean.append({"credential_id": credential, "principal_id": principal,
                       "label": label, "enrolled_at": enrolled})
@@ -405,7 +409,7 @@ def start_login(sid: str, context: str) -> dict:
     link = result.get("app_link")
     if result.get("result") != "created" or not isinstance(request, dict) or not isinstance(link, str):
         raise AgentError("The AD service did not return a valid phone request.")
-    config, _key, host, port, pin = _load()
+    config, _key, _host, _port, pin = _load()
     request_id = request.get("request_id")
     nonce = request.get("nonce")
     if (not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{8,128}", request_id)
@@ -427,9 +431,7 @@ def start_login(sid: str, context: str) -> dict:
             or query.get("sid") != [principal_id]
             or query.get("ctx") != [context]
             or query.get("m") != [config["machine_id"]]
-            or query.get("fp", [""])[0].lower() != pin
-            or query.get("h", [""])[0].lower() != host.lower()
-            or query.get("p") != [str(port)]):
+            or query.get("fp", [""])[0].lower() != pin):
         raise AgentError("The AD service returned a phone link with mismatched machine, SID, or certificate details.")
     for key, value in (("n", nonce), ("u", request.get("username")),
                        ("auth", request.get("authority")), ("scope", "domain")):
@@ -477,7 +479,7 @@ def start_phone_enrollment(sid: str) -> dict:
     link = result.get("app_link")
     if result.get("result") != "created" or not isinstance(request, dict) or not isinstance(link, str):
         raise AgentError("The AD service did not return a valid phone enrollment request.")
-    config, _key, host, port, pin = _load()
+    config, _key, _host, _port, pin = _load()
     request_id, nonce = request.get("request_id"), request.get("nonce")
     principal_id = hashlib.sha256(sid.upper().encode("ascii")).hexdigest()
     if (not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{8,128}", request_id)
@@ -500,8 +502,6 @@ def start_phone_enrollment(sid: str) -> dict:
             or query.get("m") != [config["machine_id"]] or query.get("sid") != [principal_id]
             or query.get("scope") != ["domain"] or query.get("ctx") != ["enrollment"]
             or query.get("fp", [""])[0].lower() != pin
-            or query.get("h", [""])[0].lower() != host.lower()
-            or query.get("p") != [str(port)]
             or query.get("u") != [request.get("username")]
             or query.get("auth") != [request.get("authority")]):
         raise AgentError("The AD service returned a phone link with mismatched account or certificate details.")
