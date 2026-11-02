@@ -206,6 +206,11 @@ function Ensure-PhoneApprover([string]$Account) {
     $activeEntries = @($entries | Where-Object { $_ -notmatch '\(disabled\)' })
     $hasApprover = $activeEntries.Count -gt 0
     if (-not $hasApprover) {
+        if (Test-AdPaired) {
+            Write-Host "This PC is paired with the Thessley AD service, so phone approval for an AD account comes from its central enrollment."
+            Write-Host 'No per-PC phone enrollment is needed here. The PIN and password tiles stay available.'
+            return (Ask-YesNo "Is the enrolled phone available now to test the $Account login?" $false)
+        }
         if (-not (Ask-YesNo "No phone is enrolled for $Account. Start phone enrollment now?" $true)) { return $false }
         Write-Host 'Scan the enrollment QR on the phone, compare both pairing codes, approve, then type yes here.'
         & $cli enroll --user $Account
@@ -232,6 +237,14 @@ function Invoke-CliCapture([string[]]$Arguments) {
     return [pscustomobject]@{ Lines = $lines; ExitCode = $exitCode }
 }
 
+function Test-AdPaired {
+    # A paired PC takes its phone approval from the AD service, so the guided installer must not
+    # create a second, per-PC approver for the same person.
+    $result = Invoke-CliCapture @('ad-status')
+    if ($result.ExitCode -ne 0) { return $false }
+    return (($result.Lines -join "`n") -match 'Machine ID:\s*[0-9a-f]{32}')
+}
+
 if ($enableWeb) {
     $webOnResult = Invoke-CliCapture @('web', 'on')
     if ($webOnResult.ExitCode -ne 0) {
@@ -256,6 +269,10 @@ if ($enableWeb) {
     $anyDevices = @($listed | Where-Object { $_ -match '\benrolled\s+\d{4}-\d{2}-\d{2}' })
     $enrolled = @($anyDevices | Where-Object { $_ -notmatch '\(disabled\)' })
     if ($anyDevices.Count -eq 0) {
+        if (Test-AdPaired) {
+            Write-Host "`nThis PC is paired with the Thessley AD service. Phone approval comes from the centrally enrolled AD account; no first-phone link is created here."
+            Write-Host 'The PIN and password tiles remain available for recovery.'
+        } else {
         Write-Host "`nNo phone is enrolled for $bootstrapUser. Creating the one-time first-phone link now."
         $bootstrapResult = Invoke-CliCapture @('web', 'bootstrap', '--user', $bootstrapUser)
         # The web task was started a moment ago; wait for its listener rather than printing a link nobody can open.
@@ -294,6 +311,7 @@ if ($enableWeb) {
         } else {
             foreach ($line in $bootstrapOutput) { Write-Host $line }
             Write-Warning 'The service and web page remain installed, but phone enrollment was not started. Rerun the guided installer to try again.'
+        }
         }
     } elseif ($adminSignInLine) {
         Write-Host $adminSignInLine
