@@ -122,9 +122,17 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
 
 # Check the SSH prerequisite before installing Python or changing any services.
 # The wizard deliberately does not install or reconfigure OpenSSH itself.
-$sshCapability = Get-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
-$sshInstalled = $sshCapability.State -eq 'Installed'
+$sshCapability = Get-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0 -ErrorAction SilentlyContinue
 $sshdService = Get-Service -Name sshd -ErrorAction SilentlyContinue
+# OpenSSH can be the Windows capability or the GitHub MSI/zip build; either one leaves sshd installed.
+$sshBinary = $null
+foreach ($candidate in @(
+        (Get-Command sshd.exe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -First 1),
+        (Join-Path $env:ProgramFiles 'OpenSSH\sshd.exe'))) {
+    if ($candidate -and (Test-Path -LiteralPath $candidate)) { $sshBinary = $candidate; break }
+}
+$sshInstalled = ($sshCapability -and $sshCapability.State -eq 'Installed') -or
+    ($null -ne $sshdService -and $null -ne $sshBinary)
 $sshReady = $sshInstalled -and $sshdService -and $sshdService.Status -eq 'Running'
 if (-not $sshReady) {
     if (-not $sshInstalled) {
