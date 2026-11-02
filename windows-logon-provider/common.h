@@ -32,7 +32,9 @@ enum SAMPLE_FIELD_ID
     SFI_EDIT_TEXT         = 11,
     SFI_COMBOBOX          = 12,
     SFI_QR_SETUP_LINK     = 13,
-    SFI_NUM_FIELDS        = 14,  // Keep NUM_FIELDS last; it is the credential field count.
+    SFI_USERNAME          = 14,
+    SFI_DOMAINNAME        = 15,
+    SFI_NUM_FIELDS        = 16,  // Keep NUM_FIELDS last; it is the credential field count.
 };
 
 // The first value indicates when the tile is displayed (selected, not selected)
@@ -66,6 +68,8 @@ static const FIELD_STATE_PAIR s_rgFieldStatePairs[] =
     { CPFS_DISPLAY_IN_SELECTED_TILE,   CPFIS_NONE    },    // SFI_EDIT_TEXT (QR)
     { CPFS_HIDDEN,                     CPFIS_NONE    },    // SFI_COMBOBOX
     { CPFS_DISPLAY_IN_SELECTED_TILE,   CPFIS_NONE    },    // SFI_QR_SETUP_LINK
+    { CPFS_HIDDEN,                     CPFIS_NONE    },    // SFI_USERNAME
+    { CPFS_HIDDEN,                     CPFIS_NONE    },    // SFI_DOMAINNAME
 };
 
 // Field descriptors for unlock and logon.
@@ -88,6 +92,8 @@ static const CREDENTIAL_PROVIDER_FIELD_DESCRIPTOR s_rgCredProvFieldDescriptors[]
     { SFI_EDIT_TEXT,         CPFT_LARGE_TEXT,    L"Scan this QR code with Thessley Passkey"                    },
     { SFI_COMBOBOX,          CPFT_COMBOBOX,      L"Combobox"                                                   },
     { SFI_QR_SETUP_LINK,     CPFT_COMMAND_LINK,  L"Set up QR-only sign-in"                                    },
+    { SFI_USERNAME,          CPFT_EDIT_TEXT,     L"User name"                                                 },
+    { SFI_DOMAINNAME,        CPFT_EDIT_TEXT,     L"Domain"                                                    },
 };
 
 static const PWSTR s_rgComboBoxStrings[] =

@@ -222,6 +222,7 @@ CSampleCredential::CSampleCredential():
     _pszUserSid(nullptr),
     _pszQualifiedUserName(nullptr),
     _fIsLocalUser(false),
+    _fOtherUserTile(false),
     _vaultAvailable(false),
     _passwordEntryMode(false),
     _savePasswordAfterSuccess(false),
@@ -464,9 +465,35 @@ void CSampleCredential::_StartApproval()
                         }
                         const char *principalType = _fIsLocalUser ? "local" : "domain";
                         const char *logonContext = _cpus == CPUS_UNLOCK_WORKSTATION ? "unlock" : "interactive";
-                        const std::string request = "{\"op\":\"windows-logon\",\"user\":\"" + escaped +
-                            "\",\"sid\":\"" + escapedSid + "\",\"principal_type\":\"" + principalType +
-                            "\",\"logon_context\":\"" + logonContext + "\"}\n";
+                        std::string request;
+                        if (_fOtherUserTile)
+                        {
+                            std::wstring typed;
+                            if (_rgFieldStrings[SFI_DOMAINNAME] && _rgFieldStrings[SFI_DOMAINNAME][0])
+                            {
+                                typed.append(_rgFieldStrings[SFI_DOMAINNAME]);
+                                typed.push_back(L'\\');
+                            }
+                            if (_rgFieldStrings[SFI_USERNAME])
+                                typed.append(_rgFieldStrings[SFI_USERNAME]);
+                            std::string escapedTyped;
+                            for (WCHAR c : typed)
+                            {
+                                if (c > 0x7f) continue;
+                                if (c == '"' || c == '\\') escapedTyped.push_back('\\');
+                                if (static_cast<unsigned char>(c) < 0x20) continue;
+                                escapedTyped.push_back(static_cast<char>(c));
+                            }
+                            request = "{\"op\":\"windows-logon\",\"user\":\"" + escapedTyped +
+                                "\",\"account\":\"" + escapedTyped + "\",\"principal_type\":\"domain\"" +
+                                ",\"logon_context\":\"" + logonContext + "\"}\n";
+                        }
+                        else
+                        {
+                            request = "{\"op\":\"windows-logon\",\"user\":\"" + escaped +
+                                "\",\"sid\":\"" + escapedSid + "\",\"principal_type\":\"" + principalType +
+                                "\",\"logon_context\":\"" + logonContext + "\"}\n";
+                        }
                         size_t sent = 0;
                         while (sent < request.size() && !_approvalCancelled.load())
                         {
@@ -487,6 +514,17 @@ void CSampleCredential::_StartApproval()
                                 line = received.substr(0, newline);
                                 received.erase(0, newline + 1);
                                 if (line.size() > 32768) { received.clear(); break; }
+                                const std::string resolved = JsonString(line, "\"resolved_user\"");
+                                if (_fOtherUserTile && !resolved.empty() && resolved.size() < 160)
+                                {
+                                    std::wstring wideResolved(resolved.begin(), resolved.end());
+                                    PWSTR copy = nullptr;
+                                    if (SUCCEEDED(SHStrDupW(wideResolved.c_str(), &copy)))
+                                    {
+                                        CoTaskMemFree(_pszQualifiedUserName);
+                                        _pszQualifiedUserName = copy;
+                                    }
+                                }
                                 const std::string matrix = JsonString(line, "\"qr_matrix\"");
                                 if (!matrix.empty())
                                 {
@@ -640,6 +678,32 @@ HRESULT CSampleCredential::Initialize(CREDENTIAL_PROVIDER_USAGE_SCENARIO cpus,
     }
     if (SUCCEEDED(hr))
     {
+        hr = SHStrDupW(L"", &_rgFieldStrings[SFI_USERNAME]);
+    }
+    if (SUCCEEDED(hr))
+    {
+        hr = SHStrDupW(L"", &_rgFieldStrings[SFI_DOMAINNAME]);
+    }
+    if (SUCCEEDED(hr) && pcpUser == nullptr)
+    {
+        // Windows did not enumerate an account tile for this person (for example a domain account
+        // that has never signed in on this PC). This tile takes the account name, approves it on the
+        // phone through the AD service, and only then asks for the Windows password.
+        _fOtherUserTile = true;
+        _fIsLocalUser = false;
+        _vaultAvailable = false;
+        _passwordEntryMode = false;
+        hr = SHStrDupW(L"", &_pszUserSid);
+        if (SUCCEEDED(hr)) hr = SHStrDupW(L"", &_pszQualifiedUserName);
+        if (SUCCEEDED(hr)) hr = SHStrDupW(L"Domain sign-in", &_rgFieldStrings[SFI_FULLNAME_TEXT]);
+        if (SUCCEEDED(hr)) hr = SHStrDupW(L"Other domain account", &_rgFieldStrings[SFI_DISPLAYNAME_TEXT]);
+        if (SUCCEEDED(hr)) hr = SHStrDupW(
+            L"Type the domain account, then select Submit to request phone approval.",
+            &_rgFieldStrings[SFI_LOGONSTATUS_TEXT]);
+        return hr;
+    }
+    if (SUCCEEDED(hr))
+    {
         hr = pcpUser->GetStringValue(PKEY_Identity_QualifiedUserName, &_pszQualifiedUserName);
     }
     if (SUCCEEDED(hr))
@@ -753,7 +817,9 @@ HRESULT CSampleCredential::SetSelected(_Out_ BOOL *pbAutoLogon)
 {
     *pbAutoLogon = FALSE;
     ProviderDiag(L"CredentialSetSelected", S_OK, 0);
-    if (!_phoneApproved.load())
+    // The anonymous tile does not know the account until the person types it, so approval
+    // starts from Submit, not from selection.
+    if (!_phoneApproved.load() && !_fOtherUserTile)
     {
         _StartApproval();
     }
@@ -825,6 +891,11 @@ HRESULT CSampleCredential::GetFieldState(DWORD dwFieldID,
         else if (dwFieldID == SFI_QR_SETUP_LINK)
         {
             *pcpfs = _fIsLocalUser ? CPFS_DISPLAY_IN_SELECTED_TILE : CPFS_HIDDEN;
+        }
+        else if (dwFieldID == SFI_USERNAME || dwFieldID == SFI_DOMAINNAME)
+        {
+            *pcpfs = _fOtherUserTile ? CPFS_DISPLAY_IN_SELECTED_TILE : CPFS_HIDDEN;
+            *pcpfis = CPFIS_NONE;
         }
         hr = S_OK;
     }
@@ -952,6 +1023,12 @@ HRESULT CSampleCredential::SetStringValue(DWORD dwFieldID, _In_ PCWSTR pwz)
             SecureZeroMemory(*ppwszStored, wcslen(*ppwszStored) * sizeof(WCHAR));
         CoTaskMemFree(*ppwszStored);
         hr = SHStrDupW(pwz, ppwszStored);
+        if (SUCCEEDED(hr) && _fOtherUserTile &&
+            (dwFieldID == SFI_USERNAME || dwFieldID == SFI_DOMAINNAME))
+        {
+            _phoneApproved.store(false);
+            _passwordEntryMode = false;
+        }
     }
     else
     {
@@ -1161,6 +1238,38 @@ HRESULT CSampleCredential::GetSerialization(_Out_ CREDENTIAL_PROVIDER_GET_SERIAL
     *ppwszOptionalStatusText = nullptr;
     *pcpsiOptionalStatusIcon = CPSI_NONE;
     ZeroMemory(pcpcs, sizeof(*pcpcs));
+
+    if (_fOtherUserTile)
+    {
+        const bool hasUser = _rgFieldStrings[SFI_USERNAME] && _rgFieldStrings[SFI_USERNAME][0];
+        if (!_phoneApproved.load())
+        {
+            if (!hasUser)
+            {
+                SHStrDupW(L"Enter the domain account name, then select Submit.", ppwszOptionalStatusText);
+            }
+            else if (!_approvalInProgress.load())
+            {
+                _StartApproval();
+                SHStrDupW(L"Approve on your phone; the password field appears once it is approved.",
+                          ppwszOptionalStatusText);
+            }
+            else
+            {
+                SHStrDupW(L"Waiting for the phone approval. Keep this tile selected.",
+                          ppwszOptionalStatusText);
+            }
+            *pcpsiOptionalStatusIcon = CPSI_WARNING;
+            return S_OK;
+        }
+        if (!_pszQualifiedUserName || !_pszQualifiedUserName[0])
+        {
+            SHStrDupW(L"Phone approved, but the account was not resolved. Select Submit to retry.",
+                      ppwszOptionalStatusText);
+            *pcpsiOptionalStatusIcon = CPSI_WARNING;
+            return S_OK;
+        }
+    }
 
     // The phone approval is a one-use gate. The built-in Windows PIN/password tiles remain separate recovery paths.
     if (!_phoneApproved.load())

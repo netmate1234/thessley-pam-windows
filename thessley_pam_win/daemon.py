@@ -115,6 +115,9 @@ class Handler(socketserver.StreamRequestHandler):
                 scope = req.get("principal_type", "")
                 context = req.get("logon_context", "")
                 assert isinstance(sid, str) and isinstance(scope, str) and isinstance(context, str)
+                account = req.get("account", "")
+                assert isinstance(account, str) and len(account) <= 160
+                assert not account or op == "windows-logon"
                 rhost = req.get("rhost") or grants.LOCAL
                 assert op in ("enroll", "windows-logon") or valid_rhost(rhost)
         except Exception:
@@ -136,7 +139,7 @@ class Handler(socketserver.StreamRequestHandler):
             elif req["op"] == "admin-enroll":
                 ok = self._admin_enroll(user, cancel)
             elif req["op"] == "windows-logon":
-                ok = self._windows_logon(user, cancel, sid, scope, context)
+                ok = self._windows_logon(user, cancel, sid, scope, context, account)
             elif req["op"] == "windows-logon-test":
                 ok = self._windows_logon_test(user, cancel)
             elif req["op"] == "ad-ssh-approve":
@@ -349,7 +352,7 @@ class Handler(socketserver.StreamRequestHandler):
             with self.server.enrolling_lock:
                 self.server.enrolling.discard(user)
 
-    def _windows_logon(self, user: str, cancel: threading.Event, sid: str = "", scope: str = "", context: str = "") -> bool:
+    def _windows_logon(self, user: str, cancel: threading.Event, sid: str = "", scope: str = "", context: str = "", account: str = "") -> bool:
         """A one-time phone approval for the Windows unlock tile, called by LogonUI as SYSTEM.
 
         Do not accept this operation from ordinary local processes, and never consume or create an SSH grace pass.
@@ -441,6 +444,23 @@ class Handler(socketserver.StreamRequestHandler):
                     log(f"Windows provider SID did not match the local account SID for {user!r}; using the exact local SID.", True)
                 sid = resolved_sid
                 log(f"Resolved local Windows login for {user!r} to its enrolled SID-bound Drupal key.")
+
+        # "Other user" types a name instead of selecting a Windows account: resolve it first so the
+        # AD service can authorize the exact SID and the provider can serialize the right logon name.
+        if scope == "domain" and not sid and account:
+            try:
+                resolved = ad_agent.resolve_account(account)
+            except ad_agent.AgentError as exc:
+                self._send({"say": "Thessley Passkey: that domain account cannot sign in here. Choose password or retry."})
+                log(f"AD account resolution refused for {account!r}: {exc}", True)
+                return False
+            if not resolved.get("authorized"):
+                self._send({"say": "Thessley Passkey: this account is not authorized on this computer. Choose password."})
+                log(f"AD account not authorized for {account!r}", True)
+                return False
+            sid = resolved["sid"]
+            user = resolved["username"]
+            self._send({"resolved_user": resolved["authority"] + "\\" + resolved["username"]})
 
         # A paired PC approves AD accounts through the AD service: it authorizes the SID and
         # creates a one-use, machine-bound request that only that PC can redeem.

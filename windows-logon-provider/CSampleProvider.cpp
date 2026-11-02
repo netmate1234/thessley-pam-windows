@@ -317,6 +317,27 @@ HRESULT CSampleProvider::_EnumerateCredentials()
         }
     }
 
+    // One extra tile for accounts that Windows does not list yet (never signed in on this PC):
+    // type a domain account, approve on the phone, then enter the Windows password.
+    {
+        CSampleCredential *credential = new(std::nothrow) CSampleCredential();
+        if (credential != nullptr)
+        {
+            hr = credential->Initialize(_cpus, s_rgCredProvFieldDescriptors, s_rgFieldStatePairs, nullptr);
+            ProviderDiag(L"CredentialInitializeOtherUser", hr, static_cast<DWORD>(_credentials.size()));
+            if (SUCCEEDED(hr))
+            {
+                if (_pEvents)
+                    credential->SetProviderEvents(_pEvents, _upAdviseContext);
+                _credentials.push_back(credential);
+            }
+            else
+            {
+                credential->Release();
+            }
+        }
+    }
+
     return _credentials.empty() ? E_UNEXPECTED : S_OK;
 }
 

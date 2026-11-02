@@ -335,6 +335,36 @@ def resolve_principal(sid: str) -> dict:
     }
 
 
+def resolve_account(account: str) -> dict:
+    """Resolve a typed domain account (user or DOMAIN\\user) to its current SID and name."""
+    if not isinstance(account, str):
+        raise AgentError("Enter a domain account name.")
+    account = account.strip()
+    if not account or len(account) > 160 or any(ord(c) < 0x20 for c in account):
+        raise AgentError("Enter a domain account name.")
+    result = _signed_post("/thessley-ad/v1/principals/resolve-name", {"account": account}, timeout=15.0)
+    principal = result.get("principal")
+    if (result.get("result") != "resolved" or not isinstance(principal, dict)
+            or not isinstance(principal.get("sid"), str) or not _SID.fullmatch(principal["sid"])
+            or not isinstance(principal.get("authority"), str) or not principal["authority"]
+            or len(principal["authority"]) > 256
+            or not isinstance(principal.get("username"), str) or not principal["username"]
+            or len(principal["username"]) > 64
+            or not isinstance(result.get("authorized"), bool)):
+        raise AgentError("This domain account is unavailable for sign-in.")
+    sid = principal["sid"].upper()
+    expected_id = hashlib.sha256(sid.encode("ascii")).hexdigest()
+    if principal.get("principal_id") != expected_id:
+        raise AgentError("The AD service returned an invalid account identity.")
+    return {
+        "sid": sid,
+        "principal_id": expected_id,
+        "authority": principal["authority"],
+        "username": principal["username"],
+        "authorized": result["authorized"],
+    }
+
+
 def revoke_phone_key(credential_id: str) -> None:
     if not isinstance(credential_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{32,64}", credential_id):
         raise AgentError("Invalid phone-key id.")
