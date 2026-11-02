@@ -416,6 +416,17 @@ if ($Unattended -or (Ask-YesNo 'Install or update the experimental Thessley QR W
     }
 }
 
+# A PC paired with the AD service gates domain-account SSH with the central phone key,
+# except for the local Administrator, which stays as break-glass.
+if ($adPaired -and $sshReady) {
+    $adSshGate = Join-Path $repo 'install\enable-ad-ssh-qr-all.ps1'
+    if (Test-Path -LiteralPath $adSshGate) {
+        if ($Unattended -or (Ask-YesNo 'Require phone approval for domain-account SSH logins on this PC?' $true)) {
+            & $adSshGate -RollbackMinutes 30
+        }
+    }
+}
+
 Write-Host "`nTo enroll an approver later, run:"
 Write-Host "& `"$cli`" enroll --user YOURNAME"
 if ($sshConfigured -or $providerConfigured) {
