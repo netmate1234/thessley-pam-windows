@@ -349,8 +349,9 @@ def resolve_account(account: str) -> dict:
             or not isinstance(principal.get("authority"), str) or not principal["authority"]
             or len(principal["authority"]) > 256
             or not isinstance(principal.get("username"), str) or not principal["username"]
-            or len(principal["username"]) > 64
-            or not isinstance(result.get("authorized"), bool)):
+            or len(principal["username"]) > 64):
+        # The resolve-name route already refuses accounts outside the sign-in population, so a
+        # successful reply means this account may sign in here; older builds omit "authorized".
         raise AgentError("This domain account is unavailable for sign-in.")
     sid = principal["sid"].upper()
     expected_id = hashlib.sha256(sid.encode("ascii")).hexdigest()

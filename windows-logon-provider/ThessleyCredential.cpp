@@ -700,6 +700,18 @@ HRESULT CSampleCredential::Initialize(CREDENTIAL_PROVIDER_USAGE_SCENARIO cpus,
         if (SUCCEEDED(hr)) hr = SHStrDupW(
             L"Type the domain account, then select Submit to request phone approval.",
             &_rgFieldStrings[SFI_LOGONSTATUS_TEXT]);
+        if (SUCCEEDED(hr))
+        {
+            // Prefill the domain this PC joined; the person can still edit it for another domain.
+            wchar_t adDomain[256] = {0};
+            DWORD adDomainLen = ARRAYSIZE(adDomain);
+            if (!GetComputerNameExW(ComputerNameDnsDomain, adDomain, &adDomainLen) || !adDomain[0])
+            {
+                const DWORD envLen = GetEnvironmentVariableW(L"USERDOMAIN", adDomain, ARRAYSIZE(adDomain));
+                if (envLen == 0 || envLen >= ARRAYSIZE(adDomain)) adDomain[0] = 0;
+            }
+            hr = SHStrDupW(adDomain, &_rgFieldStrings[SFI_DOMAINNAME]);
+        }
         return hr;
     }
     if (SUCCEEDED(hr))
