@@ -436,6 +436,12 @@ if ($adPaired -and $sshReady) {
             & $adSshGate -RollbackMinutes 30
         }
     }
+    $adminOnlySsh = Join-Path $repo 'install\restrict-ssh-admin.ps1'
+    if (Test-Path -LiteralPath $adminOnlySsh) {
+        if ($Unattended -or (Ask-YesNo 'Allow SSH logins only for the Administrator account?' $true)) {
+            & $adminOnlySsh -RollbackMinutes 20
+        }
+    }
 }
 
 Write-Host "`nTo enroll an approver later, run:"
