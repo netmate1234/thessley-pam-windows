@@ -18,7 +18,10 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
 
 $base = Join-Path $env:ProgramData 'ThessleyPamWin'
 $config = Join-Path $env:ProgramData 'ssh\sshd_config'
-$sshd = Join-Path $env:WINDIR 'System32\OpenSSH\sshd.exe'
+$sshd = @(
+    (Join-Path $env:WINDIR 'System32\OpenSSH\sshd.exe'),
+    (Join-Path $env:ProgramFiles 'OpenSSH\sshd.exe')
+) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
 $forceCommand = Join-Path $base 'ad-ssh-gate.cmd'
 $pythonGate = Join-Path $base 'app\ad_ssh_gate_main.py'
 $taskName = "ThessleyADSSHConfigRollback-$($Domain)-$($UserName)"
