@@ -1213,7 +1213,9 @@ HRESULT CSampleCredential::GetSerialization(_Out_ CREDENTIAL_PROVIDER_GET_SERIAL
 
     // For local user, the domain and user name can be split from _pszQualifiedUserName (domain\username).
     // CredPackAuthenticationBuffer() cannot be used because it won't work with unlock scenario.
-    if (_fIsLocalUser)
+    // At the logon and unlock screens the interactive Kerberos form handles both local
+    // and domain accounts; CredPack is kept for the credential UI path.
+    if (_fIsLocalUser || _cpus == CPUS_LOGON || _cpus == CPUS_UNLOCK_WORKSTATION)
     {
         PWSTR pwzProtectedPassword;
         hr = ProtectIfNecessaryAndCopyPassword(const_cast<PWSTR>(password), _cpus, &pwzProtectedPassword);
