@@ -19,7 +19,7 @@ import time
 from typing import Callable
 from urllib.parse import urlencode
 
-from . import approve, machine, protocol, qr, store, tpmproof
+from . import approve, attestation as key_attestation, machine, protocol, qr, store, tpmproof
 
 ENROLL_WAIT = 180   # seconds the QR code stays valid
 CONFIRM_WAIT = 90   # seconds to type "yes" once the codes are shown
@@ -123,14 +123,24 @@ def run(username: str, say: Callable[[str], None], ask_yes: Callable[[str, int],
             return 409, {"result": "error", "message": "This code has already been used."}
         tpm = body.get("tpm")
         attestation = check_tpm(public_key, tpm if isinstance(tpm, dict) else None)
+        # Where the phone's signing key actually lives, proven against Google's
+        # attestation roots with the enrolment nonce as the challenge.
+        try:
+            expected_key = base64.b64decode(public_key, validate=True)
+        except (ValueError, TypeError):
+            expected_key = None
+        key_attest = key_attestation.verify_chain(
+            chain, expected_challenge=nonce.encode("ascii"), expected_public_key_spki=expected_key)
         pending.put({"client_ip": client_ip, "public_key": public_key, "label": label, "chain": chain,
-                     "attestation": attestation})
+                     "attestation": attestation, "key_attestation": key_attest})
         if not decided.wait(confirm_wait + 10) or not decision.get("ok"):
             if decision.get("error"):
                 return 500, {"result": "error", "message": "The computer could not save this device: " + decision["error"]}
             return 200, {"result": "denied", "message": "Not confirmed on the computer."}
         return 200, {"result": "ok", "credential_id": decision["credential_id"], "username": username, "hostname": host,
-                     "attestation": "tpm" if (attestation or {}).get("level") == "tpm" else ""}
+                     "attestation": "tpm" if (attestation or {}).get("level") == "tpm" else "",
+                     "attestation_status": key_attest.get("status", "unverified"),
+                     "attestation_reason": key_attest.get("reason", "")}
 
     path = f"/thessley-pam/v1/enroll/{request_id}/respond"
     tpm_path = f"/thessley-pam/v1/enroll/{request_id}/tpm-challenge"
@@ -169,7 +179,11 @@ def run(username: str, say: Callable[[str], None], ask_yes: Callable[[str, int],
                                  if att["level"] == "tpm" else f"claimed but NOT verified ({att['reason']})"))
         try:
             if ask_yes("Does it show the same code? Type yes to add it: ", int(confirm_wait)):
-                device = store.add_device(username, item["public_key"], item["label"], item["chain"], item.get("attestation"))
+                key = item.get("key_attestation") or {}
+                device = store.add_device(
+                    username, item["public_key"], item["label"], item["chain"], item.get("attestation"),
+                    key_attestation_status=str(key.get("status", "unverified")),
+                    key_attestation_reason=str(key.get("reason", "")))
                 decision.update(ok=True, credential_id=device["credential_id"])
         except OSError as exc:
             decision["error"] = str(exc)
