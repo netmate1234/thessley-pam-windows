@@ -394,13 +394,14 @@ def set_access(username: str, qr_enabled: bool, blocked: bool, factor: str = "na
     # Open the existing file in place to retain its Windows ACL.
     try:
         config.write_text(updated, encoding="utf-8", newline="")
-        check = subprocess.run([str(sshd), "-t", "-f", str(config)], capture_output=True, text=True, timeout=20)
+        check = subprocess.run([str(sshd), "-t", "-f", str(config), "-o", "UseDNS=no"],
+                               capture_output=True, text=True, timeout=60)
         if check.returncode:
             raise RuntimeError("sshd rejected the updated config: " + (check.stderr or check.stdout).strip())
         if qr_enabled:
             effective = subprocess.run([str(sshd), "-T", "-f", str(config), "-C",
-                                         f"user={name},host=localhost,addr=127.0.0.1"],
-                                        capture_output=True, text=True, timeout=20)
+                                         f"user={name},host=localhost,addr=127.0.0.1", "-o", "UseDNS=no"],
+                                        capture_output=True, text=True, timeout=60)
             if effective.returncode or not re.search(r"(?im)^forcecommand .*gate_main\.py", effective.stdout):
                 if "unable to resolve user" in (effective.stderr + effective.stdout).casefold():
                     raise UnresolvableAccount(f"sshd cannot look up the account {name} by that name; QR approval was not applied to it.")
