@@ -1432,6 +1432,7 @@ HRESULT CSampleCredential::GetSerialization(_Out_ CREDENTIAL_PROVIDER_GET_SERIAL
         }
     }
 
+    ProviderDiag(L"GetSerializationResult", hr, static_cast<DWORD>(*pcpgsr));
     if (SUCCEEDED(hr) && *pcpgsr == CPGSR_RETURN_CREDENTIAL_FINISHED && _savePasswordAfterSuccess)
     {
         const size_t chars = wcslen(password) + 1;
