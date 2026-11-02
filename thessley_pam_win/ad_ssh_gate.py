@@ -121,14 +121,9 @@ def main(env=None, out=None, address=(HOST, PORT), run=subprocess.call, sid=None
     original = env.get("SSH_ORIGINAL_COMMAND") or ""
     # Without a terminal there is nowhere to show the QR code or take Ctrl+C, so a phone request is never started. scp
     # (and SFTP) may still go through when an earlier approval, a pass, is valid for this account and client address.
+    # A session without a terminal cannot show a QR, but an earlier approval (a pass) may still
+    # cover it. That keeps scripts and automation working between two interactive approvals.
     pass_only = not env.get("SSH_TTY")
-    if pass_only and not is_file_transfer_command(original):
-        print(
-            "Thessley AD SSH: this approval needs an interactive terminal. "
-            "Reconnect with ssh -tt so Ctrl+C can cancel the QR request.",
-            file=out, flush=True,
-        )
-        return 1
     identity = peer.process_identity(os.getpid()) if sid is None else {"sid": sid}
     if not identity or not isinstance(identity.get("sid"), str):
         print("Thessley AD SSH: cannot identify this account. Refusing.", file=out, flush=True)
@@ -141,6 +136,15 @@ def main(env=None, out=None, address=(HOST, PORT), run=subprocess.call, sid=None
         print("Thessley AD SSH: SFTP sessions are only supported without a terminal, using an earlier approval. Refusing.",
               file=out, flush=True)
         return 1
+    if pass_only and not is_file_transfer_command(original):
+        if not ask_ad(identity["sid"], rhost, out, address, pass_only=True):
+            print(
+                "Thessley AD SSH: no valid approval covers this command. Log in once with ssh -tt and approve on "
+                "the phone, then retry within the pass length.",
+                file=out, flush=True,
+            )
+            return 1
+        return run(gate.shell_command(gate.default_shell(), original))
     if not ask_ad(identity["sid"], rhost, out, address, pass_only=pass_only):
         return 1
     return run(gate.shell_command(gate.default_shell(), original))
