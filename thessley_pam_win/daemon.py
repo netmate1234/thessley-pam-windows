@@ -461,7 +461,8 @@ class Handler(socketserver.StreamRequestHandler):
                 return False
             sid = resolved["sid"]
             user = resolved["username"]
-            self._send({"resolved_user": resolved["authority"] + "\\" + resolved["username"]})
+            self._send({"resolved_authority": resolved["authority"],
+                        "resolved_username": resolved["username"]})
 
         # A paired PC approves AD accounts through the AD service: it authorizes the SID and
         # creates a one-use, machine-bound request that only that PC can redeem.

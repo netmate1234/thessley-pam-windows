@@ -514,10 +514,14 @@ void CSampleCredential::_StartApproval()
                                 line = received.substr(0, newline);
                                 received.erase(0, newline + 1);
                                 if (line.size() > 32768) { received.clear(); break; }
-                                const std::string resolved = JsonString(line, "\"resolved_user\"");
-                                if (_fOtherUserTile && !resolved.empty() && resolved.size() < 160)
+                                const std::string resolvedAuthority = JsonString(line, "\"resolved_authority\"");
+                                const std::string resolvedName = JsonString(line, "\"resolved_username\"");
+                                if (_fOtherUserTile && !resolvedAuthority.empty() && !resolvedName.empty() &&
+                                    resolvedAuthority.size() + resolvedName.size() < 160)
                                 {
-                                    std::wstring wideResolved(resolved.begin(), resolved.end());
+                                    std::wstring wideResolved(resolvedAuthority.begin(), resolvedAuthority.end());
+                                    wideResolved.push_back(L'\\');
+                                    wideResolved.append(resolvedName.begin(), resolvedName.end());
                                     PWSTR copy = nullptr;
                                     if (SUCCEEDED(SHStrDupW(wideResolved.c_str(), &copy)))
                                     {
