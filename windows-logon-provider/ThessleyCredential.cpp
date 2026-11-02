@@ -833,8 +833,12 @@ HRESULT CSampleCredential::SetSelected(_Out_ BOOL *pbAutoLogon)
 {
     *pbAutoLogon = FALSE;
     ProviderDiag(L"CredentialSetSelected", S_OK, 0);
-    // Approval starts from Submit. Starting it on selection made a QR window appear as soon as
-    // LogonUI opened, and kept the agent busy before the person asked for anything.
+    // A named account tile has no account field to confirm, so selecting it starts the approval.
+    // The anonymous tile waits for Submit because the account is typed there.
+    if (!_phoneApproved.load() && !_fOtherUserTile)
+    {
+        _StartApproval();
+    }
     return S_OK;
 }
 
