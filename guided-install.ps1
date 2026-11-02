@@ -416,6 +416,17 @@ if ($Unattended -or (Ask-YesNo 'Install or update the experimental Thessley QR W
     }
 }
 
+# Hide the built-in password tile once the Thessley tile exists, so the password is not a
+# second sign-in option on the same screen. PIN and the Thessley tile stay.
+if ($providerConfigured) {
+    $passwordTileStep = Join-Path $repo 'install\exclude-password-tile.ps1'
+    if (Test-Path -LiteralPath $passwordTileStep) {
+        if ($Unattended -or (Ask-YesNo 'Hide the Windows password sign-in tile and keep the Thessley tile plus PIN?' $true)) {
+            & $passwordTileStep -RollbackMinutes 20
+        }
+    }
+}
+
 # A PC paired with the AD service gates domain-account SSH with the central phone key,
 # except for the local Administrator, which stays as break-glass.
 if ($adPaired -and $sshReady) {

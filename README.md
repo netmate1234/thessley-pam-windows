@@ -19,7 +19,10 @@ and preserves their existing key/password settings. Accounts without an enrolled
 until enrollment; afterward, QR approval is required. In **Admin → Users**, administrators can change each account's QR
 requirement, block SSH, and select its first factor. Changes require fresh admin phone approval, back up and validate
 `sshd_config`, and restart OpenSSH. Keep a working SSH session and Windows PIN/password recovery available while changing login settings; the sign-in
-tile has its own rollback. Confirm only
+tile has its own rollback. After the tile is installed the wizard offers one more step: **hide the built-in Windows
+password sign-in tile** (`install\exclude-password-tile.ps1`), leaving the Thessley tile and PIN as the way in. It refuses
+to run when the Thessley tile is not registered, backs up the previous `ExcludedCredentialProviders` value, and arms a
+20-minute rollback. Set a PIN before hiding the password tile. Confirm only
 after testing every selected login method with `C:\ProgramData\ThessleyPamWin\confirm-setup.ps1`. Python 3.12+ for all
 users is required; if it is missing, the wizard offers to install Python 3.13 with winget. It detects a missing
 OpenSSH service and stops before changing SSH policy.
