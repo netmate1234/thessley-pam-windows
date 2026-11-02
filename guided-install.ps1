@@ -82,6 +82,16 @@ function Select-PhoneNetworkInterface {
         Write-Host "Phone links will use $($selected.Address) on $($selected.Alias)."
         return [string]$selected.Index
     }
+    if ($Unattended) {
+        # Never prompt when unattended: prefer a real LAN address over the libvirt NAT network.
+        $selected = @($candidates | Where-Object { $_.Address -notmatch '^192\.168\.122\.' } | Select-Object -First 1)
+        if ($selected.Count -eq 0) {
+            $selected = @($candidates | Where-Object { $_.Gateway } | Select-Object -First 1)
+        }
+        if ($selected.Count -eq 0) { $selected = @($candidates[0]) }
+        Write-Host "Phone links will use $($selected[0].Address) on $($selected[0].Alias) (unattended selection)."
+        return [string]$selected[0].Index
+    }
 
     Write-Host "`nThis PC has multiple active IPv4 adapters. Thessley puts the selected address in phone approval links. Choose an address the phone can reach (your LAN or VPN); do not choose a VM-only NAT address."
     for ($i = 0; $i -lt $candidates.Count; $i++) {
