@@ -46,7 +46,7 @@ $markerStart = '# BEGIN THESSLEY AD SSH QR all-users'
 $markerEnd = '# END THESSLEY AD SSH QR all-users'
 $block = @(
     $markerStart,
-    'Match User *,!administrator*',
+    'Match User *,!*dministrator*',
     '    AllowTcpForwarding no',
     '    AllowAgentForwarding no',
     '    PermitTTY yes',
@@ -99,7 +99,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw ('sshd rejected the updated config: ' + ($check -join ' ')) }
     # A -C probe resolves the account through the domain and can fail for a bare domain name,
     # so the check is the accepted configuration plus the managed block being present.
-    $applied = Select-String -LiteralPath $config -Pattern '^Match User \*,!administrator\*$', 'ad_ssh_gate_main\.py' -ErrorAction SilentlyContinue
+    $applied = Select-String -LiteralPath $config -Pattern '^Match User \*,!\*dministrator\*$', 'ad_ssh_gate_main\.py' -ErrorAction SilentlyContinue
     if (-not $applied) {
         throw 'The AD SSH gate block was not written; sshd_config was restored.'
     }
