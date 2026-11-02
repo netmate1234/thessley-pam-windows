@@ -211,7 +211,7 @@ class Handler(socketserver.StreamRequestHandler):
                     log(f"AD SSH approval refused because {principal['authority']}\\{principal['username']} is no longer authorized", True)
                     return False
                 active_credentials = {
-                    key["credential_id"] for key in ad_agent.phone_keys()
+                    key["credential_id"] for key in ad_agent.phone_keys(principal["principal_id"])
                     if key["principal_id"] == principal["principal_id"]
                 }
             except (ad_agent.AgentError, OSError, ValueError) as exc:
@@ -441,6 +441,26 @@ class Handler(socketserver.StreamRequestHandler):
                     log(f"Windows provider SID did not match the local account SID for {user!r}; using the exact local SID.", True)
                 sid = resolved_sid
                 log(f"Resolved local Windows login for {user!r} to its enrolled SID-bound Drupal key.")
+
+        # A paired PC approves AD accounts through the AD service: it authorizes the SID and
+        # creates a one-use, machine-bound request that only that PC can redeem.
+        if scope == "domain" and sid and ad_agent.configured():
+            try:
+                request = ad_agent.start_login(sid, context or "interactive")
+            except ad_agent.AgentError as exc:
+                self._send({"say": "Thessley Passkey: the AD service is unavailable. Choose PIN or password, or retry."})
+                log(f"AD Windows approval refused for {user!r}: {exc}", True)
+                return False
+            if not self._send({"qr_matrix": request["qr_matrix"]}):
+                return False
+            if not self._send({"say": f"Approve {request['authority']}\\{request['username']} with Thessley Passkey."}):
+                return False
+            approved = ad_agent.poll_login(request["request_id"], cancel, say=say)
+            if approved:
+                log(f"AD Windows approval granted for {user!r} by phone key {approved}.")
+                return True
+            log(f"AD Windows approval was not granted for {user!r}.", True)
+            return False
 
         if sid and drupal_agent.configured_sid(sid):
             if not context:

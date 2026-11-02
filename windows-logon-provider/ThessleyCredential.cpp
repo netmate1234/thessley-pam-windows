@@ -15,7 +15,9 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <unknwn.h>
+#include <ntsecapi.h>
 #include <sddl.h>
+#include <cstring>
 #include <cwchar>
 #include <string>
 #include <vector>
@@ -78,34 +80,46 @@ static HRESULT WindowsAccountNameFromSid(PCWSTR sidText, std::wstring &accountNa
     return accountName.empty() ? HRESULT_FROM_WIN32(ERROR_NONE_MAPPED) : S_OK;
 }
 
-// The user-array provider ID is not a reliable local-vs-domain boundary:
-// Windows can report Identity_LocalUserProvider for a domain profile. The
-// qualified identity name gives us the authority Windows will log on against.
-// This provider is for local machine accounts (and Microsoft-account-backed
-// local profiles); domain identities must use the separate AD provider.
-static bool IsLocalQrAccount(PCWSTR qualifiedUserName)
+// Decide from the account SID, not PKEY_Identity_QualifiedUserName: LogonUI
+// can report a domain profile as MACHINE\\user, which incorrectly exposes
+// this local-only provider and then fails with "no approver". Read the local
+// SAM account-domain SID from LSA (no DNS/DC lookup) and compare the SID prefix.
+static bool IsLocalQrAccount(PCWSTR sidText)
 {
-    if (!qualifiedUserName || !*qualifiedUserName) return false;
+    if (!sidText || !*sidText) return false;
+    PSID accountSid = nullptr;
+    if (!ConvertStringSidToSidW(sidText, &accountSid)) return false;
 
-    const wchar_t *separator = wcschr(qualifiedUserName, L'\\');
-    if (!separator || separator == qualifiedUserName || !separator[1]) return false;
+    LSA_OBJECT_ATTRIBUTES attributes{};
+    attributes.Length = sizeof(attributes);
+    LSA_HANDLE policy = nullptr;
+    NTSTATUS status = LsaOpenPolicy(nullptr, &attributes,
+                                    POLICY_VIEW_LOCAL_INFORMATION, &policy);
+    PPOLICY_ACCOUNT_DOMAIN_INFO info = nullptr;
+    if (status >= 0)
+        status = LsaQueryInformationPolicy(policy, PolicyAccountDomainInformation,
+                                           reinterpret_cast<PVOID *>(&info));
 
-    // Windows also represents an explicitly local account as .\\user.
-    if (separator == qualifiedUserName + 1 && qualifiedUserName[0] == L'.')
-        return true;
+    bool isLocal = false;
+    if (status >= 0 && info && info->DomainSid && IsValidSid(accountSid))
+    {
+        const UCHAR localCount = *GetSidSubAuthorityCount(info->DomainSid);
+        const UCHAR accountCount = *GetSidSubAuthorityCount(accountSid);
+        const SID_IDENTIFIER_AUTHORITY *localAuthority = GetSidIdentifierAuthority(info->DomainSid);
+        const SID_IDENTIFIER_AUTHORITY *accountAuthority = GetSidIdentifierAuthority(accountSid);
+        isLocal = localAuthority && accountAuthority && accountCount == localCount + 1 &&
+            std::memcmp(localAuthority, accountAuthority, sizeof(*localAuthority)) == 0;
+        for (UCHAR index = 0; isLocal && index < localCount; ++index)
+        {
+            isLocal = *GetSidSubAuthority(info->DomainSid, index) ==
+                      *GetSidSubAuthority(accountSid, index);
+        }
+    }
 
-    const int authorityLength = static_cast<int>(separator - qualifiedUserName);
-    if (authorityLength == 16 && CompareStringOrdinal(
-            qualifiedUserName, authorityLength, L"MicrosoftAccount", 16, TRUE) == CSTR_EQUAL)
-        return true;
-
-    wchar_t computerName[MAX_COMPUTERNAME_LENGTH + 1] = {};
-    DWORD computerNameLength = ARRAYSIZE(computerName);
-    if (!GetComputerNameW(computerName, &computerNameLength)) return false;
-
-    return CompareStringOrdinal(qualifiedUserName, authorityLength,
-                               computerName, static_cast<int>(computerNameLength),
-                               TRUE) == CSTR_EQUAL;
+    if (info) LsaFreeMemory(info);
+    if (policy) LsaClose(policy);
+    LocalFree(accountSid);
+    return isLocal;
 }
 
 static std::wstring RenderQr(const std::string &matrix)
@@ -511,7 +525,16 @@ void CSampleCredential::_StartApproval()
                 _phoneApproved.store(true);
                 update(SFI_LOGONSTATUS_TEXT, IsAutoLogonReady() && providerEvents
                     ? L"Phone approved. Signing in..."
-                    : L"Phone approved. Select Submit to sign in.");
+                    : (_fIsLocalUser ? L"Phone approved. Select Submit to sign in."
+                                     : L"Phone approved. Enter the Windows password, then Submit."));
+                if (!_fIsLocalUser && _pCredProvCredentialEvents)
+                {
+                    // The password is asked for only after the phone approval, never before it.
+                    _passwordEntryMode = true;
+                    _pCredProvCredentialEvents->BeginFieldUpdates();
+                    _pCredProvCredentialEvents->SetFieldState(this, SFI_PASSWORD, CPFS_DISPLAY_IN_SELECTED_TILE);
+                    _pCredProvCredentialEvents->EndFieldUpdates();
+                }
                 if (IsAutoLogonReady() && providerEvents)
                 {
                     const HRESULT changedHr = providerEvents->CredentialsChanged(providerAdviseContext);
@@ -618,11 +641,16 @@ HRESULT CSampleCredential::Initialize(CREDENTIAL_PROVIDER_USAGE_SCENARIO cpus,
     if (SUCCEEDED(hr))
     {
         hr = pcpUser->GetStringValue(PKEY_Identity_QualifiedUserName, &_pszQualifiedUserName);
+    }
+    if (SUCCEEDED(hr))
+    {
+        hr = pcpUser->GetSid(&_pszUserSid);
         if (SUCCEEDED(hr))
         {
-            _fIsLocalUser = IsLocalQrAccount(_pszQualifiedUserName);
+            _fIsLocalUser = IsLocalQrAccount(_pszUserSid);
             ProviderDiag(L"LocalAccountCheck", S_OK, _fIsLocalUser ? 1 : 0);
-            if (!_fIsLocalUser) hr = E_ACCESSDENIED;
+            // A domain account on a PC paired with the AD service approves with its central phone key,
+            // then enters the Windows password. The built-in PIN/password tiles stay untouched.
         }
     }
     if (SUCCEEDED(hr))
@@ -676,13 +704,10 @@ HRESULT CSampleCredential::Initialize(CREDENTIAL_PROVIDER_USAGE_SCENARIO cpus,
 
     if (SUCCEEDED(hr))
     {
-        hr = pcpUser->GetSid(&_pszUserSid);
-    }
-    if (SUCCEEDED(hr))
-    {
         // Microsoft accounts can also have a local Windows SID. Keep the password field
         // hidden for every account and use the SID-bound vault for either serialization path.
-        _vaultAvailable = ThessleyPasswordVaultExists(_pszUserSid);
+        // A domain account has no local vault: it enters the Windows password after the phone approves.
+        _vaultAvailable = _fIsLocalUser && ThessleyPasswordVaultExists(_pszUserSid);
         _passwordEntryMode = false;
         if (_vaultAvailable)
         {
@@ -794,12 +819,12 @@ HRESULT CSampleCredential::GetFieldState(DWORD dwFieldID,
         }
         else if (dwFieldID == SFI_CHECKBOX)
         {
-            *pcpfs = _passwordEntryMode
+            *pcpfs = (_passwordEntryMode && _fIsLocalUser)
                 ? CPFS_DISPLAY_IN_SELECTED_TILE : CPFS_HIDDEN;
         }
         else if (dwFieldID == SFI_QR_SETUP_LINK)
         {
-            *pcpfs = CPFS_DISPLAY_IN_SELECTED_TILE;
+            *pcpfs = _fIsLocalUser ? CPFS_DISPLAY_IN_SELECTED_TILE : CPFS_HIDDEN;
         }
         hr = S_OK;
     }
