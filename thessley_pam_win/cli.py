@@ -278,7 +278,9 @@ def cmd_ad_enroll(args) -> int:
     _need_admin()
     import getpass
 
-    code = getpass.getpass("One-time Thessley AD machine enrollment code: ").strip()
+    code = (args.code or "").strip()
+    if not code:
+        code = getpass.getpass("One-time Thessley AD machine enrollment code: ").strip()
     try:
         machine_id = ad_agent.enroll_machine(args.server, args.tls_sha256, code)
     except (ad_agent.AgentError, OSError, ValueError) as exc:
@@ -515,6 +517,8 @@ def main(argv=None) -> int:
     ad = sub.add_parser("ad-enroll", help="pair this computer with the standalone Thessley AD service")
     ad.add_argument("--server", required=True, help="pinned HTTPS origin of the standalone AD service")
     ad.add_argument("--tls-sha256", required=True, help="64-character certificate fingerprint from the service")
+    ad.add_argument("--code", default=None,
+                    help="one-time pairing code; omit to be asked for it without echoing")
     sub.add_parser("ad-status", help="show whether this computer is paired with the standalone AD service")
     sub.add_parser("ad-check", help="verify pinned TLS and machine authentication with the standalone AD service")
     if hasattr(sys.stdout, "reconfigure"):

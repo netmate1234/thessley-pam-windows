@@ -4,6 +4,14 @@
   OpenSSH Server is installed and verified separately; this script never
   installs, starts, or edits OpenSSH configuration or Windows sign-in policy.
 #>
+param(
+    # Unattended: pair with the AD service and install the sign-in tile without questions.
+    # Requires -ServerUrl, -TlsSha256 and -PairingCode; SSH and web policy stay at safe defaults.
+    [switch]$Unattended,
+    [string]$ServerUrl = '',
+    [string]$TlsSha256 = '',
+    [string]$PairingCode = ''
+)
 $ErrorActionPreference = 'Stop'
 # Over ssh the console code page is not UTF-8; the Python tools print UTF-8. Without this their text arrives garbled.
 try { [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false) } catch { }
@@ -114,7 +122,7 @@ if (-not $sshReady) {
     } else {
         Write-Warning 'OpenSSH Server is installed but sshd is not running. Thessley SSH QR login cannot work until sshd is started.'
     }
-    if (-not (Ask-YesNo 'Continue with web administration and optional Windows sign-in only, without SSH QR login?' $false)) {
+    if (-not $Unattended -and -not (Ask-YesNo 'Continue with web administration and optional Windows sign-in only, without SSH QR login?' $false)) {
         throw 'No Thessley setup changes were made. Install and start OpenSSH Server, then rerun this wizard.'
     }
 }
@@ -125,7 +133,7 @@ if (-not $python) {
     if (-not (Get-Command winget.exe -ErrorAction SilentlyContinue)) {
         throw 'Python 3.12+ for all users is required. Install it from python.org, then rerun this wizard.'
     }
-    if (Ask-YesNo 'Install Python 3.13 for all users using winget? This is required for the Thessley service.' $true) {
+    if ($Unattended -or (Ask-YesNo 'Install Python 3.13 for all users using winget? This is required for the Thessley service.' $true)) {
         winget install --id Python.Python.3.13 --scope machine --accept-package-agreements --accept-source-agreements
         if ($LASTEXITCODE -ne 0) { throw 'Python installation failed. Install Python 3.12+ for all users, then rerun this wizard.' }
         $python = Find-MachinePython
@@ -136,7 +144,9 @@ Write-Host "Using machine-wide Python: $python"
 
 $phoneInterfaceIndex = Select-PhoneNetworkInterface
 
-$cloudAccess = Ask-YesNo 'Is this a cloud host whose SSH clients and phone approvals may come from changing public IP addresses? Cloud mode opens selected Windows firewall ports to any remote IP.' $false
+$cloudAccess = if ($Unattended) { $false } else {
+    Ask-YesNo 'Is this a cloud host whose SSH clients and phone approvals may come from changing public IP addresses? Cloud mode opens selected Windows firewall ports to any remote IP.' $false
+}
 $openSshFirewall = $false
 if ($cloudAccess) {
     $openSshFirewall = $sshInstalled -and (Ask-YesNo 'Allow SSH connections on TCP 22 from any remote IP? The cloud provider firewall must also allow this.' $true)
@@ -146,6 +156,10 @@ if ($cloudAccess) {
     if ($enableWeb) {
         $openWebFirewall = Ask-YesNo 'Allow the admin web page on TCP 47820 from any remote IP? Keep this off unless remote web access is needed.' $false
     }
+} elseif ($Unattended) {
+    $openApprovalFirewall = $true
+    $enableWeb = $false
+    $openWebFirewall = $false
 } else {
     $openApprovalFirewall = Ask-YesNo 'Allow phone approvals and enrollment to reach this PC on TCP 47810 from the local subnet?' $true
     $enableWeb = Ask-YesNo 'Install and enable the HTTPS admin web page on TCP 47820?' $true
@@ -159,7 +173,8 @@ $sshVpnFirewall = $sshInstalled -and $sshdService -and $sshdService.Status -eq '
 if (-not $cloudAccess -and ($openApprovalFirewall -or $openWebFirewall -or $sshVpnFirewall)) {
     $defaultVpnSubnets = '10.8.0.0/24,10.8.1.0/24'
     $cidrPattern = '^(?:(?:25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])/(?:[0-9]|[12][0-9]|3[0-2])$'
-    while ($true) {
+    if ($Unattended) { $vpnClientSubnets = $defaultVpnSubnets }
+    while (-not $Unattended -and $true) {
         $choice = Read-Host "Also allow SSH, phone approvals, and the web GUI from VPN ranges $defaultVpnSubnets? Local networks remain allowed. [Y/n/custom]"
         if ([string]::IsNullOrWhiteSpace($choice) -or $choice -match '^(y|yes)$') {
             $vpnClientSubnets = $defaultVpnSubnets
@@ -194,6 +209,29 @@ $arguments.VpnClientSubnets = $vpnClientSubnets
 
 $cli = Join-Path $env:ProgramData 'ThessleyPamWin\thessley-pam-win.cmd'
 
+# Pair the computer with the AD service when asked to, so the sign-in tile and the domain
+# accounts work straight away instead of asking for a local approver on this PC.
+$adStatus = @(& $cli ad-status 2>&1)
+$adPaired = ($adStatus -join "`n") -match 'Machine ID:\s*[0-9a-f]{32}'
+if (-not $adPaired) {
+    if ($ServerUrl -or $TlsSha256 -or $PairingCode) {
+        if (-not $ServerUrl -or -not $TlsSha256 -or -not $PairingCode) {
+            throw 'Pairing needs -ServerUrl, -TlsSha256 and -PairingCode together.'
+        }
+        Write-Host 'Pairing this computer with the Thessley AD service...'
+        & $cli ad-enroll --server $ServerUrl --tls-sha256 $TlsSha256 --code $PairingCode
+        if ($LASTEXITCODE -ne 0) { throw 'The computer could not be paired with the AD service.' }
+        $adPaired = $true
+    } elseif (-not $Unattended -and (Ask-YesNo 'Pair this computer with a Thessley AD service now so AD accounts can sign in with their phone?' $false)) {
+        $pairServer = Read-Host 'AD service URL (for example https://dc.example.net:47810)'
+        $pairPin = Read-Host 'Certificate SHA-256 (64 hexadecimal characters)'
+        $pairCode = Read-Host 'One-time pairing code from the AD admin page'
+        & $cli ad-enroll --server $pairServer --tls-sha256 $pairPin --code $pairCode
+        if ($LASTEXITCODE -ne 0) { throw 'The computer could not be paired with the AD service.' }
+        $adPaired = $true
+    }
+}
+
 function Ensure-PhoneApprover([string]$Account) {
     $listed = @(& $cli list --user $Account 2>&1)
     $listStatus = $LASTEXITCODE
@@ -209,7 +247,8 @@ function Ensure-PhoneApprover([string]$Account) {
         if (Test-AdPaired) {
             Write-Host "This PC is paired with the Thessley AD service, so phone approval for an AD account comes from its central enrollment."
             Write-Host 'No per-PC phone enrollment is needed here. The PIN and password tiles stay available.'
-            return (Ask-YesNo "Is the enrolled phone available now to test the $Account login?" $false)
+            if ($Unattended) { return $true }
+    return (Ask-YesNo "Is the enrolled phone available now to test the $Account login?" $false)
         }
         if (-not (Ask-YesNo "No phone is enrolled for $Account. Start phone enrollment now?" $true)) { return $false }
         Write-Host 'Scan the enrollment QR on the phone, compare both pairing codes, approve, then type yes here.'
@@ -219,6 +258,7 @@ function Ensure-PhoneApprover([string]$Account) {
             return $false
         }
     }
+    if ($Unattended) { return $true }
     return (Ask-YesNo "Is the enrolled phone available now to test the $Account login?" $false)
 }
 
@@ -344,9 +384,9 @@ if ($cloudAccess) {
 }
 
 $providerConfigured = $false
-if (Ask-YesNo 'Install or update the experimental Thessley QR Windows sign-in tile now? Keep PIN/password recovery available.' $false) {
+if ($Unattended -or (Ask-YesNo 'Install or update the experimental Thessley QR Windows sign-in tile now? Keep PIN/password recovery available.' $false)) {
     $defaultLogonUser = $env:USERNAME
-    $logonUser = Read-Host "Windows account to test at the sign-in screen [$defaultLogonUser]"
+    $logonUser = if ($Unattended) { $defaultLogonUser } else { Read-Host "Windows account to test at the sign-in screen [$defaultLogonUser]" }
     if ([string]::IsNullOrWhiteSpace($logonUser)) { $logonUser = $defaultLogonUser }
     if ($logonUser -notmatch '^[A-Za-z0-9._-]{1,64}$') { throw 'Use a simple account name: letters, numbers, dot, underscore, or hyphen.' }
     if (Ensure-PhoneApprover $logonUser) {
