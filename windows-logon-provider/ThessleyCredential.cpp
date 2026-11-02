@@ -704,11 +704,11 @@ HRESULT CSampleCredential::Initialize(CREDENTIAL_PROVIDER_USAGE_SCENARIO cpus,
         {
             // Prefill the domain this PC joined; the person can still edit it for another domain.
             wchar_t adDomain[256] = {0};
-            DWORD adDomainLen = ARRAYSIZE(adDomain);
-            if (!GetComputerNameExW(ComputerNameDnsDomain, adDomain, &adDomainLen) || !adDomain[0])
+            const DWORD envLen = GetEnvironmentVariableW(L"USERDOMAIN", adDomain, ARRAYSIZE(adDomain));
+            if (envLen == 0 || envLen >= ARRAYSIZE(adDomain))
             {
-                const DWORD envLen = GetEnvironmentVariableW(L"USERDOMAIN", adDomain, ARRAYSIZE(adDomain));
-                if (envLen == 0 || envLen >= ARRAYSIZE(adDomain)) adDomain[0] = 0;
+                DWORD adDomainLen = ARRAYSIZE(adDomain);
+                if (!GetComputerNameExW(ComputerNameDnsDomain, adDomain, &adDomainLen)) adDomain[0] = 0;
             }
             hr = SHStrDupW(adDomain, &_rgFieldStrings[SFI_DOMAINNAME]);
         }
@@ -829,12 +829,8 @@ HRESULT CSampleCredential::SetSelected(_Out_ BOOL *pbAutoLogon)
 {
     *pbAutoLogon = FALSE;
     ProviderDiag(L"CredentialSetSelected", S_OK, 0);
-    // The anonymous tile does not know the account until the person types it, so approval
-    // starts from Submit, not from selection.
-    if (!_phoneApproved.load() && !_fOtherUserTile)
-    {
-        _StartApproval();
-    }
+    // Approval starts from Submit. Starting it on selection made a QR window appear as soon as
+    // LogonUI opened, and kept the agent busy before the person asked for anything.
     return S_OK;
 }
 
@@ -1286,8 +1282,15 @@ HRESULT CSampleCredential::GetSerialization(_Out_ CREDENTIAL_PROVIDER_GET_SERIAL
     // The phone approval is a one-use gate. The built-in Windows PIN/password tiles remain separate recovery paths.
     if (!_phoneApproved.load())
     {
-        SHStrDupW(L"Approve this sign-in with Thessley Passkey first, or choose another Windows sign-in option.",
-                  ppwszOptionalStatusText);
+        if (!_approvalInProgress.load())
+        {
+            _StartApproval();
+            SHStrDupW(L"Approve on your phone, then select Submit again.", ppwszOptionalStatusText);
+        }
+        else
+        {
+            SHStrDupW(L"Waiting for the phone approval. Keep this tile selected.", ppwszOptionalStatusText);
+        }
         *pcpsiOptionalStatusIcon = CPSI_WARNING;
         return S_OK;
     }

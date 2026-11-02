@@ -448,6 +448,7 @@ class Handler(socketserver.StreamRequestHandler):
         # "Other user" types a name instead of selecting a Windows account: resolve it first so the
         # AD service can authorize the exact SID and the provider can serialize the right logon name.
         if scope == "domain" and not sid and account:
+            account = "\\".join(part.strip() for part in account.split("\\")).strip()
             try:
                 resolved = ad_agent.resolve_account(account)
             except ad_agent.AgentError as exc:

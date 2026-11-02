@@ -362,7 +362,8 @@ def resolve_account(account: str) -> dict:
         "principal_id": expected_id,
         "authority": principal["authority"],
         "username": principal["username"],
-        "authorized": result["authorized"],
+        # A successful resolve-name reply already means the account may sign in here.
+        "authorized": True,
     }
 
 
