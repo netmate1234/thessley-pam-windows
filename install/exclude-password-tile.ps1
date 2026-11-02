@@ -55,6 +55,27 @@ $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes($RollbackMin
 $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
 Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
 
+# Keep the exclusion across reboots and feature updates: a tiny SYSTEM task re-asserts it at startup.
+$enforce = Join-Path $backupDir 'enforce-password-tile.ps1'
+$enforceBody = @"
+`$ErrorActionPreference = 'Stop'
+`$p = '$policyPath'
+`$name = '$policyName'
+`$provider = '$passwordProvider'
+`$current = (Get-ItemProperty -Path `$p -Name `$name -ErrorAction SilentlyContinue).`$name
+`$entries = @()
+if (`$current) { `$entries = @(`$current -split ';' | Where-Object { `$_ }) }
+if (`$entries -notcontains `$provider) {
+    New-Item -Path `$p -Force | Out-Null
+    Set-ItemProperty -Path `$p -Name `$name -Value ((`$entries + `$provider) -join ';') -Type String
+}
+"@
+Set-Content -LiteralPath $enforce -Value $enforceBody -Encoding ascii
+$enforceAction = New-ScheduledTaskAction -Execute (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$enforce`""
+$enforceTrigger = New-ScheduledTaskTrigger -AtStartup
+$enforcePrincipal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+Register-ScheduledTask -TaskName 'ThessleyPasswordTilePolicy' -Action $enforceAction -Trigger $enforceTrigger -Principal $enforcePrincipal -Force | Out-Null
+
 Write-Output 'The Windows password tile is hidden; the Thessley tile and PIN remain.'
 Write-Output "ExcludedCredentialProviders = $value"
 Write-Output "Lock the screen to test. Keep it with: Unregister-ScheduledTask -TaskName '$taskName' -Confirm:`$false"
