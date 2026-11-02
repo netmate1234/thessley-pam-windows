@@ -1,5 +1,5 @@
 <#
-  Gate SSH for every account except the local Administrator with the AD phone approval.
+  Gate SSH for every account, including the administrator with the AD phone approval.
   This is the installer's "enable everywhere" step for a PC paired with the AD service:
   members of the AD sign-in group approve on the phone, and the local Administrator stays
   as break-glass for automation. It keeps a timed rollback like the per-account variant.
@@ -46,7 +46,7 @@ $markerStart = '# BEGIN THESSLEY AD SSH QR all-users'
 $markerEnd = '# END THESSLEY AD SSH QR all-users'
 $block = @(
     $markerStart,
-    'Match User *,!*dministrator*',
+    'Match User *',
     '    AllowTcpForwarding no',
     '    AllowAgentForwarding no',
     '    PermitTTY yes',
@@ -99,7 +99,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw ('sshd rejected the updated config: ' + ($check -join ' ')) }
     # A -C probe resolves the account through the domain and can fail for a bare domain name,
     # so the check is the accepted configuration plus the managed block being present.
-    $applied = Select-String -LiteralPath $config -Pattern '^Match User \*,!\*dministrator\*$', 'ad_ssh_gate_main\.py' -ErrorAction SilentlyContinue
+    $applied = Select-String -LiteralPath $config -Pattern '^Match User \*$', 'ad_ssh_gate_main\.py' -ErrorAction SilentlyContinue
     if (-not $applied) {
         throw 'The AD SSH gate block was not written; sshd_config was restored.'
     }
@@ -137,7 +137,7 @@ if (Test-Path -LiteralPath $register) {
 $cli = Join-Path $base 'thessley-pam-win.cmd'
 if (Test-Path -LiteralPath $cli) { & $cli grace --hours 4 | Out-Null }
 
-Write-Output 'AD QR SSH approval enabled for every account except the local Administrator.'
+Write-Output 'AD QR SSH approval enabled for every account, including the administrator.'
 Write-Output 'One approval now covers SSH logins from the same client IP for 4 hours.'
 Write-Output "Config backup: $backup"
 Write-Output "Automatic rollback in $RollbackMinutes minutes. Test a fresh SSH login as a domain account, then keep it with:"
