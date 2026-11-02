@@ -677,7 +677,7 @@ HRESULT CSampleCredential::Initialize(CREDENTIAL_PROVIDER_USAGE_SCENARIO cpus,
     }
     if (SUCCEEDED(hr))
     {
-        hr = SHStrDupW(L"Set up QR-only sign-in (one-time Windows password)",
+        hr = SHStrDupW(L"Use a saved password for QR sign-in",
                        &_rgFieldStrings[SFI_QR_SETUP_LINK]);
     }
     if (SUCCEEDED(hr))
@@ -1220,7 +1220,7 @@ HRESULT CSampleCredential::CommandLinkClicked(DWORD dwFieldID)
             _pCredProvCredentialEvents->SetFieldString(this, SFI_QR_SETUP_LINK,
                 _passwordEntryMode ? L"Cancel password setup" :
                     (_vaultAvailable ? L"Update saved QR sign-in" :
-                                       L"Set up QR-only sign-in (one-time Windows password)"));
+                                       L"Use a saved password for QR sign-in"));
             _pCredProvCredentialEvents->SetFieldString(this, SFI_EDIT_TEXT,
                 _passwordEntryMode
                     ? L"Enter the Windows password once. After a successful sign-in it is encrypted on this PC; future sign-ins use phone approval."
