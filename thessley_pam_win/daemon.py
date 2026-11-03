@@ -682,16 +682,7 @@ def main() -> int:
     cert_path, key_path = os.path.join(cert_dir, "cert.pem"), os.path.join(cert_dir, "key.pem")
     shared = None
     last_network_log = 0.0
-    listener_enabled = True
-    try:
-        with open(os.path.join(store.BASE, "config.json"), encoding="utf-8") as handle:
-            cfg = json.load(handle)
-        if isinstance(cfg, dict) and cfg.get("listener_enabled") is False:
-            listener_enabled = False
-    except (OSError, ValueError):
-        pass
-    if listener_enabled:
-      while shared is None:
+    while shared is None:
         try:
             ip = machine.lan_ip()
             parsed_ip = ipaddress.ip_address(ip)
@@ -707,14 +698,9 @@ def main() -> int:
                 log(f"waiting for a usable network address before starting the approval listener: {e}", True)
                 last_network_log = now
             time.sleep(1)
-      approve.set_shared_listener(shared)
-    else:
-        log("approval listener disabled by config.json; the AD SSH gate uses the AD service")
+    approve.set_shared_listener(shared)
     server = Server()
-    if shared is not None:
-        log(f"service started on {HOST}:{server.server_address[1]} and HTTPS approval listener {ip}:47810")
-    else:
-        log(f"service started on {HOST}:{server.server_address[1]} without a local approval listener")
+    log(f"service started on {HOST}:{server.server_address[1]} and HTTPS approval listener {ip}:47810")
     drupal_sync_stop = threading.Event()
     threading.Thread(
         target=drupal_agent.sync_loop,
@@ -727,8 +713,7 @@ def main() -> int:
     finally:
         drupal_sync_stop.set()
         server.server_close()
-        if shared is not None:
-            shared.close()
+        shared.close()
     return 0
 
 

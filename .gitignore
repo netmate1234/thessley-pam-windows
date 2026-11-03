@@ -3,6 +3,12 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 /downloads/*.zip
+<<<<<<< HEAD
 
 # Built download bundles
 downloads/
+=======
+>>>>>>> gitlab/main
+*.zip
+*.exe
+*.msi
