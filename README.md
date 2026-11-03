@@ -1,5 +1,8 @@
 # thessley-pam-windows
 
+**Presentation:** [HTML slides](https://netmate1234.github.io/thessley-presentations/pam-windows/) · source [`docs/index.html`](docs/index.html)
+
+
 Approve ssh logins to a **Windows 11** computer with the Thessley Passkey phone app or desktop app: the account's password
 first, then a QR code and a `thessleypam://` link that a phone (or the desktop app) approves with a signature.
 
