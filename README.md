@@ -2,7 +2,7 @@
 
 Approve Windows SSH logins with the same phone and the same protocol as the Linux gate.
 
-**Presentation:** [slides on GitHub Pages](https://netmate1234.github.io/thessley-presentations/pam-windows/)
+**Presentation:** [slides on GitHub Pages](https://netmate1234.github.io/thessley-pam-windows/)
 
 - Windows OpenSSH has no PAM, so the approval runs as a `ForceCommand` right after the password.
 - A small service running as SYSTEM keeps approvers and passes where a logged-in user cannot change them.
