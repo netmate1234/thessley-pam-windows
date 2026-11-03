@@ -437,6 +437,19 @@ if ($providerConfigured) {
     }
 }
 
+# Limit who may sign in at this PC. Any authorised AD account could otherwise use the tile.
+if ($providerConfigured) {
+    $rightsStep = Join-Path $repo 'install\restrict-logon-rights.ps1'
+    if (Test-Path -LiteralPath $rightsStep) {
+        if ($Unattended) {
+            & $rightsStep -RollbackMinutes 20
+        } elseif (Ask-YesNo 'Limit sign-in at this PC to Administrators (and optionally one group)?' $false) {
+            $signInGroup = Read-Host 'Extra group allowed to sign in (blank for Administrators only)'
+            & $rightsStep -InteractiveGroup $signInGroup -RollbackMinutes 20
+        }
+    }
+}
+
 # A PC paired with the AD service gates domain-account SSH with the central phone key,
 # except for the local Administrator, which stays as break-glass.
 if ($adPaired -and $sshReady) {
