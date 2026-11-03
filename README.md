@@ -1,19 +1,17 @@
 # thessley-pam-windows
 
-![License](https://img.shields.io/badge/license-GPL--2.0--or--later-7c6cf0?style=flat-square) ![Windows](https://img.shields.io/badge/Windows-11-0078d4?style=flat-square) ![Python](https://img.shields.io/badge/Python-3.10%2B-3776ab?style=flat-square) ![Deck](https://img.shields.io/badge/deck-slides-7c6cf0?style=flat-square)
+![License](https://img.shields.io/badge/license-GPL--2.0--or--later-7c6cf0?style=flat-square) ![Windows](https://img.shields.io/badge/Windows-11-0078d4?style=flat-square) ![Python](https://img.shields.io/badge/Python-3.10%2B-3776ab?style=flat-square) ![Deck](https://img.shields.io/badge/deck-7c6cf0?style=flat-square)
 
-[![thessley-pam-windows](docs/preview/slide-1.png)](https://netmate1234.github.io/thessley-pam-windows/)
+[](https://netmate1234.github.io/thessley-pam-windows/)
 
 Approve Windows SSH logins with the same phone and the same protocol as the Linux gate.
 
-**Presentation:** [slides on GitHub Pages](https://netmate1234.github.io/thessley-pam-windows/)
+**Presentation:** [interactive deck](https://netmate1234.github.io/thessley-pam-windows/)
 
 - Windows OpenSSH has no PAM, so the approval runs as a `ForceCommand` right after the password.
 - A small service running as SYSTEM keeps approvers and passes where a logged-in user cannot change them.
 - The gate, daemon, CLI and admin page are separate pieces; the wire protocol is byte-identical to the Linux side.
 - Read `docs/SSH.md` first — it explains the design, limits and what has and has not been tested.
-
-![Password first, then the phone](docs/preview/slide-2.png)
 
 Approve ssh logins to a **Windows 11** computer with the Thessley Passkey phone app or desktop app: the account's password
 first, then a QR code and a `thessleypam://` link that a phone (or the desktop app) approves with a signature.
