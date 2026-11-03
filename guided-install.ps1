@@ -10,7 +10,10 @@ param(
     [switch]$Unattended,
     [string]$ServerUrl = '',
     [string]$TlsSha256 = '',
-    [string]$PairingCode = ''
+    [string]$PairingCode = '',
+    # Optional local or domain group allowed to sign in at the console, in addition to
+    # Administrators. RDP stays Administrators-only.
+    [string]$SignInGroup = ''
 )
 $ErrorActionPreference = 'Stop'
 # Over ssh the console code page is not UTF-8; the Python tools print UTF-8. Without this their text arrives garbled.
@@ -432,7 +435,7 @@ if ($providerConfigured) {
     $rdpStep = Join-Path $repo 'install\configure-rdp-tile.ps1'
     if (Test-Path -LiteralPath $rdpStep) {
         if ($Unattended -or (Ask-YesNo 'Make Remote Desktop use the Thessley tile and allow only administrators to connect?' $false)) {
-            & $rdpStep -RollbackMinutes 20
+            & $rdpStep -Keep
         }
     }
 }
@@ -442,10 +445,10 @@ if ($providerConfigured) {
     $rightsStep = Join-Path $repo 'install\restrict-logon-rights.ps1'
     if (Test-Path -LiteralPath $rightsStep) {
         if ($Unattended) {
-            & $rightsStep -RollbackMinutes 20
+            & $rightsStep -InteractiveGroup $SignInGroup -Keep
         } elseif (Ask-YesNo 'Limit sign-in at this PC to Administrators (and optionally one group)?' $false) {
-            $signInGroup = Read-Host 'Extra group allowed to sign in (blank for Administrators only)'
-            & $rightsStep -InteractiveGroup $signInGroup -RollbackMinutes 20
+            $signInGroup = if ($SignInGroup) { $SignInGroup } else { Read-Host 'Extra group allowed to sign in (blank for Administrators only)' }
+            & $rightsStep -InteractiveGroup $signInGroup -Keep
         }
     }
 }

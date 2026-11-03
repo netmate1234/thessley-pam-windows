@@ -1,10 +1,12 @@
 <#
   Limit who may sign in at this PC: interactive logon for Administrators (plus one optional
   group), Remote Desktop for Administrators only. Writes the rights with secedit, verifies the
-  result, and arms a timed rollback that restores the previous rights.
+  result, and arms a timed rollback that restores the previous rights unless -Keep makes the
+  change permanent (the installer uses -Keep).
 #>
 param(
     [string]$InteractiveGroup = '',
+    [switch]$Keep,
     [ValidateRange(5, 60)][int]$RollbackMinutes = 20
 )
 
@@ -18,7 +20,7 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
 $backupDir = Join-Path $env:ProgramData 'ThessleyPamWin\backups'
 New-Item -ItemType Directory -Force -Path $backupDir | Out-Null
 $taskName = 'ThessleyLogonRightsRollback'
-if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
+if (-not $Keep -and (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue)) {
     throw 'A logon-rights rollback is already armed. Confirm or let it expire first.'
 }
 
@@ -73,11 +75,17 @@ Unregister-ScheduledTask -TaskName '$taskName' -Confirm:`$false -ErrorAction Sil
 Write-Output 'Logon rights restored.'
 "@
 Set-Content -LiteralPath $rb -Value $body -Encoding ascii
-$action = New-ScheduledTaskAction -Execute (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$rb`""
-$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes($RollbackMinutes)
-$principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
+if (-not $Keep) {
+    $action = New-ScheduledTaskAction -Execute (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$rb`""
+    $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes($RollbackMinutes)
+    $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+    Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
+}
 
 Write-Output "Interactive logon: Administrators$([string]::Concat($(if ($groupSid) { " + $InteractiveGroup ($groupSid)" } else { '' })))"
 Write-Output 'Remote Desktop: Administrators only'
-Write-Output "Rollback in $RollbackMinutes minutes (task $taskName)."
+if ($Keep) {
+    Write-Output "Settings kept permanently. Previous rights saved in $before (rollback script $rb)."
+} else {
+    Write-Output "Rollback in $RollbackMinutes minutes (task $taskName)."
+}
