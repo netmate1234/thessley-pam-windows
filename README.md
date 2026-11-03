@@ -1,5 +1,16 @@
 # thessley-pam-windows
 
+Approve Windows SSH logins with the same phone and the same protocol as the Linux gate.
+
+**Presentation:** [slides on GitHub Pages](https://netmate1234.github.io/thessley-presentations/pam-windows/)
+
+- Windows OpenSSH has no PAM, so the approval runs as a `ForceCommand` right after the password.
+- A small service running as SYSTEM keeps approvers and passes where a logged-in user cannot change them.
+- The gate, daemon, CLI and admin page are separate pieces; the wire protocol is byte-identical to the Linux side.
+- Read `docs/SSH.md` first — it explains the design, limits and what has and has not been tested.
+
+![Password first, then the phone](docs/preview/slide-2.png)
+
 [![thessley-pam-windows — deck](docs/preview/slide-1.png)](https://netmate1234.github.io/thessley-presentations/pam-windows/)
 
 **Interactive deck:** [netmate1234.github.io/thessley-presentations/pam-windows](https://netmate1234.github.io/thessley-presentations/pam-windows/) — arrow keys or click the edges.
