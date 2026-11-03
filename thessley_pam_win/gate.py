@@ -51,6 +51,9 @@ def ask(user: str, rhost: str, out, address=(HOST, PORT), timeout: float = WAIT_
                     print(str(msg["say"]), file=out, flush=True)
                 if msg.get("done"):
                     return msg.get("ok") is True
+    except KeyboardInterrupt:
+        print("Thessley Passkey: cancelled. Refusing.", file=out, flush=True)
+        return False
     except (OSError, ValueError):
         pass
     finally:

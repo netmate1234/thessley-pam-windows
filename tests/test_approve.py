@@ -218,6 +218,7 @@ class PassTests(Base):
         self.assertTrue(result["ok"])
         self.assertIn("approved earlier", " ".join(self.lines))
         self.assertFalse(any(l.startswith("Link: ") for l in self.lines))
+        self.assertFalse(any("pass used" in message.lower() for message, _warn in self.logs))
 
     def test_pass_does_not_work_from_another_address(self):
         self._with_grace(4)
@@ -251,6 +252,19 @@ class PassTests(Base):
         self.assertIsNotNone(grants.valid("alice", "9.9.9.9", {"c_x"}, now=1000 + 4 * 3600 - 1))
         self.assertIsNone(grants.valid("alice", "9.9.9.9", {"c_x"}, now=1000 + 4 * 3600 + 1))
         self.assertIsNone(grants.valid("alice", "9.9.9.9", {"c_other"}, now=1000))
+
+    def test_domain_pass_is_distinct_and_rechecked_against_active_phone_keys(self):
+        self._with_grace(4)
+        sid_hash = "a" * 64
+        now = time.time()
+        grants.add(sid_hash, "192.168.1.50", 4, "credential_active",
+                   now=now, display_user="THESSLEYLAB\\martin")
+        self.assertIsNotNone(grants.valid(sid_hash, "192.168.1.50", {"credential_active"}, now=now + 1))
+        self.assertIsNone(grants.valid(sid_hash, "192.168.1.50", set(), now=now + 1))
+        self.assertIsNone(grants.valid(sid_hash, "192.168.1.51", {"credential_active"}, now=now + 1))
+        self.assertEqual(grants.all_passes()[0]["display_user"], "THESSLEYLAB\\martin")
+        self.assertEqual(grants.revoke("martin"), 1)
+        self.assertEqual(grants.all_passes(), [])
 
     def test_grace_is_capped_and_off_by_default(self):
         store.ensure_dirs()

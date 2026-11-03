@@ -1,13 +1,13 @@
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=61,<81"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "thessley-pam-windows"
 version = "0.1.0"
 description = "Approve ssh logins to Windows 11 with Thessley Passkey (password first, then phone or desktop approval)"
-requires-python = ">=3.10"
-dependencies = ["cryptography", "qrcode"]
+requires-python = ">=3.12"
+dependencies = ["cryptography==50.0.2", "qrcode==8.2", "asn1crypto==1.5.1"]
 
 [project.optional-dependencies]
 test = ["pytest"]

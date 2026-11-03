@@ -17,7 +17,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 
 from fakeenroll import EnrollingPhone
 from fakephone import FakePhone, answer_unsigned
-from thessley_pam_win import approve, grants, machine, store, web
+from thessley_pam_win import approve, daemon, grants, machine, store, web
 
 USER = "alice"
 OTHER = "bob"
@@ -144,6 +144,22 @@ class WebBase(unittest.TestCase):
 
 
 class WebTest(WebBase):
+    def test_attempt_buckets_are_bounded(self):
+        grants.set_web(rate_limit_entries=64)
+        self.app.attempts = {f"192.0.2.{i}": [0.0] for i in range(64)}
+        self.assertTrue(self.app.rate_ok("198.51.100.7"))
+        self.assertLessEqual(len(self.app.attempts), 64)
+
+    def test_service_log_rotation_obeys_configured_size_and_count(self):
+        grants.set_web(log_max_bytes=100000, log_rotations=2)
+        daemon.log("a" * 100001)
+        daemon.log("b" * 100001)
+        daemon.log("c" * 100001)
+        base = os.path.join(store.BASE, "service.log")
+        self.assertTrue(os.path.exists(base + ".1"))
+        self.assertTrue(os.path.exists(base + ".2"))
+        self.assertFalse(os.path.exists(base + ".3"))
+
     # -- sign-in
     def test_sign_in_with_an_approval_opens_the_page(self):
         self.assertEqual(self.b.get("/keys")[0].status, 303)  # not signed in: sent to the sign-in page
@@ -472,6 +488,7 @@ class WebTest(WebBase):
     def test_parse_activity(self):
         ok = web.parse_activity("2026-10-17 01:14:10 INFO pass granted to windows (from 192.168.1.190, 4 h)", None)
         self.assertEqual(ok, ("2026-10-17 01:14:10", "Pass granted to windows from 192.168.1.190 for 4 h"))
+        self.assertIsNone(web.parse_activity("2026-10-17 01:14:10 INFO pass used for alice (from 192.168.1.190, 3 h left)", None))
         self.assertIsNone(web.parse_activity("garbage", None))
         self.assertIsNone(web.parse_activity("2026-10-17 01:14:10 WARN timeout for bob (from 1.2.3.4)", "alice"))
 
@@ -566,9 +583,15 @@ class SettingsTest(unittest.TestCase):
     def test_defaults_and_limits(self):
         st = grants.web_settings()
         self.assertEqual((st["enabled"], st["listen"], st["port"], st["session_minutes"]), (False, "", 47820, 15))
+        self.assertEqual((st["max_connections"], st["rate_limit_entries"], st["log_max_bytes"], st["log_rotations"]),
+                         (32, 4096, 1_000_000, 5))
         grants.set_web(enabled=True, port=70000, session_minutes=0)
         st = grants.web_settings()
         self.assertEqual((st["enabled"], st["port"], st["session_minutes"]), (True, 65535, 1))
+        grants.set_web(max_connections=1, rate_limit_entries=200000, log_max_bytes=999, log_rotations=99)
+        st = grants.web_settings()
+        self.assertEqual((st["max_connections"], st["rate_limit_entries"], st["log_max_bytes"], st["log_rotations"]),
+                         (4, 100000, 100000, 20))
         with self.assertRaises(ValueError):
             grants.set_web(nonsense=1)
 

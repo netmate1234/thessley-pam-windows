@@ -22,19 +22,21 @@ user name in the request: it asks Windows which account owns the connection (pee
 import ipaddress
 import json
 import os
+import re
 import select
 import socket
 import socketserver
 import threading
 import time
 
-from . import approve, enroll, grants, machine, peer, store, web
+from . import ad_agent, approve, drupal_agent, enroll, grants, machine, peer, qr, store, web
 from .listener import SharedListener
 
 HOST, PORT = "127.0.0.1", 47800
 MAX_REQUEST = 2048
 MAX_ACTIVE = 8          # approvals waiting at once
-LOG_LIMIT = 1_000_000   # bytes; the log is cut when it gets larger
+LOGON_NETWORK_WAIT = 180  # let the selected adapter recover after sleep before starting the phone timer
+_log_lock = threading.Lock()
 
 
 def log_path() -> str:
@@ -44,10 +46,27 @@ def log_path() -> str:
 def log(msg: str, warn: bool = False) -> None:
     try:
         path = log_path()
-        if os.path.exists(path) and os.path.getsize(path) > LOG_LIMIT:
-            os.replace(path, path + ".old")
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {'WARN' if warn else 'INFO'} {msg}\n")
+        with _log_lock:
+            settings = grants.web_settings()
+            log_limit = settings["log_max_bytes"]
+            rotations = settings["log_rotations"]
+            for index in range(rotations + 1, 21):
+                try:
+                    os.remove(f"{path}.{index}")
+                except FileNotFoundError:
+                    pass
+            if os.path.exists(path) and os.path.getsize(path) >= log_limit:
+                try:
+                    os.remove(f"{path}.{rotations}")
+                except FileNotFoundError:
+                    pass
+                for index in range(rotations - 1, 0, -1):
+                    source, target = f"{path}.{index}", f"{path}.{index + 1}"
+                    if os.path.exists(source):
+                        os.replace(source, target)
+                os.replace(path, path + ".1")
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {'WARN' if warn else 'INFO'} {msg}\n")
     except OSError:
         pass
 
@@ -76,11 +95,31 @@ class Handler(socketserver.StreamRequestHandler):
     def handle(self):
         try:
             req = json.loads(self.rfile.readline(MAX_REQUEST + 1))
-            assert isinstance(req, dict) and req.get("op") in ("approve", "enroll")
-            user = req["user"]
-            assert isinstance(user, str)
-            rhost = req.get("rhost") or grants.LOCAL
-            assert req["op"] == "enroll" or valid_rhost(rhost)
+            assert isinstance(req, dict)
+            op = req.get("op")
+            assert op in (
+                "approve", "enroll", "admin-enroll", "web-approve", "web-enroll",
+                "windows-logon", "windows-logon-test", "ad-ssh-approve")
+            if op == "ad-ssh-approve":
+                assert set(req) in ({"op", "sid", "rhost"}, {"op", "sid", "rhost", "pass_only"})
+                assert req.get("pass_only", False) is True or "pass_only" not in req
+                sid = req["sid"]
+                assert isinstance(sid, str) and re.fullmatch(r"S-1-(?:[0-9]+-)+[0-9]+", sid, re.IGNORECASE)
+                rhost = req["rhost"]
+                assert valid_rhost(rhost) and rhost != grants.LOCAL
+                user, scope, context = "", "domain", "ssh"
+            else:
+                user = req["user"]
+                assert isinstance(user, str)
+                sid = req.get("sid", "")
+                scope = req.get("principal_type", "")
+                context = req.get("logon_context", "")
+                assert isinstance(sid, str) and isinstance(scope, str) and isinstance(context, str)
+                account = req.get("account", "")
+                assert isinstance(account, str) and len(account) <= 160
+                assert not account or op == "windows-logon"
+                rhost = req.get("rhost") or grants.LOCAL
+                assert op in ("enroll", "windows-logon") or valid_rhost(rhost)
         except Exception:
             self._send({"done": True, "ok": False, "error": "bad request"})
             return
@@ -93,6 +132,18 @@ class Handler(socketserver.StreamRequestHandler):
         try:
             if req["op"] == "approve":
                 ok = self._approve(user, rhost, cancel)
+            elif req["op"] == "web-approve":
+                ok = self._web_approve(user, rhost, req.get("service", "web"), cancel)
+            elif req["op"] == "web-enroll":
+                ok = self._web_enroll(user, cancel)
+            elif req["op"] == "admin-enroll":
+                ok = self._admin_enroll(user, cancel)
+            elif req["op"] == "windows-logon":
+                ok = self._windows_logon(user, cancel, sid, scope, context, account)
+            elif req["op"] == "windows-logon-test":
+                ok = self._windows_logon_test(user, cancel)
+            elif req["op"] == "ad-ssh-approve":
+                ok = self._ad_ssh_approve(sid, rhost, cancel, req.get("pass_only") is True)
             else:
                 ok = self._enroll(user, cancel)
         except Exception as e:  # strict: any unexpected failure refuses
@@ -112,6 +163,15 @@ class Handler(socketserver.StreamRequestHandler):
     def _approve(self, user: str, rhost: str, cancel: threading.Event) -> bool:
         self.connection.settimeout(None)
 
+        try:
+            normalized = store.normalize_user(user)
+            if not store.devices(normalized) and grants.ssh_fallback_unenrolled(normalized):
+                self._send({"say": "No phone is enrolled for this account; continuing with its configured OpenSSH authentication."})
+                log(f"{normalized} used the configured OpenSSH factor because no phone is enrolled", False)
+                return True
+        except (OSError, ValueError):
+            pass
+
         def watch():  # the client hangs up (ssh session dropped): stop waiting
             try:
                 while self.connection.recv(1):
@@ -122,6 +182,388 @@ class Handler(socketserver.StreamRequestHandler):
 
         threading.Thread(target=watch, daemon=True).start()
         return approve.run(user, rhost, "ssh", self._say(cancel), log, cancel=cancel)
+
+    def _ad_ssh_approve(self, sid: str, rhost: str, cancel: threading.Event, pass_only: bool = False) -> bool:
+        """Phone-gate AD SSH, reusing the configured short-lived pass when still valid.
+
+        `pass_only` (a session without a terminal, i.e. scp or SFTP) accepts a valid pass and otherwise refuses without
+        starting a phone request."""
+        self.connection.settimeout(None)
+        identity = peer.client_identity(self.client_address, self.server.server_address[1])
+        if (not identity or identity.get("sid_type") != 1
+                or str(identity.get("sid", "")).casefold() != sid.casefold()
+                or not identity.get("authority")
+                or identity["authority"].casefold() == socket.gethostname().casefold()
+                or identity["authority"].casefold() in ("builtin", "nt authority", "nt service")):
+            self._send({"say": "Thessley AD SSH: caller identity check failed. Refusing."})
+            log("AD SSH approval refused because the SSH process token was not the requested domain user", True)
+            return False
+
+        if not ad_agent.configured():
+            self._send({"say": "Thessley AD SSH: this PC is not paired with the AD approval service. Refusing."})
+            log("AD SSH approval refused because this PC is not paired with the AD service", True)
+            return False
+
+        grace = grants.grace_hours()
+        pass_rhost = "*" if grants.grace_any_ip() else rhost
+        if grace > 0:
+            try:
+                principal = ad_agent.resolve_principal(sid)
+                if not principal["authorized"]:
+                    self._send({"say": "Thessley AD SSH: this account is no longer authorized on this computer. Refusing."})
+                    log(f"AD SSH approval refused because {principal['authority']}\\{principal['username']} is no longer authorized", True)
+                    return False
+                active_credentials = {
+                    key["credential_id"] for key in ad_agent.phone_keys(principal["principal_id"])
+                    if key["principal_id"] == principal["principal_id"]
+                }
+            except (ad_agent.AgentError, OSError, ValueError) as exc:
+                self._send({"say": "Thessley AD SSH: could not verify current AD access and phone keys. Refusing."})
+                log(f"AD SSH authorization/pass check failed ({type(exc).__name__})", True)
+                return False
+            held = grants.valid(principal["principal_id"], pass_rhost, active_credentials)
+            if held:
+                remaining = grants.remaining(held)
+                self._send({"say": f"Thessley AD SSH: approved earlier; this login is covered ({remaining} remain)."})
+                log(f"AD SSH pass used for {principal['authority']}\\{principal['username']} from {rhost} ({remaining} remain)")
+                return True
+
+        if pass_only:
+            self._send({"say": (
+                "Thessley AD SSH: scp and SFTP need an approval from earlier. Log in once with ssh -tt, approve on the "
+                "phone, then retry within the pass length." if grace > 0 else
+                "Thessley AD SSH: scp and SFTP need a pass, and passes are switched off on this computer. Refusing.")})
+            log(f"AD SSH file transfer refused for {rhost}: no valid pass", False)
+            return False
+
+        def watch():
+            try:
+                while self.connection.recv(1):
+                    pass
+            except OSError:
+                pass
+            cancel.set()
+
+        threading.Thread(target=watch, daemon=True).start()
+        try:
+            started = ad_agent.start_login(sid, "ssh")
+        except (ad_agent.AgentError, OSError, ValueError) as exc:
+            self._send({"say": "Thessley AD SSH: approval could not be started. Refusing."})
+            log(f"AD SSH request creation failed ({type(exc).__name__})", True)
+            return False
+
+        if not self._send({"say": "Scan this AD account SSH approval with Thessley Passkey."}) or not self._send(
+                {"qr_link": started["link"]}):
+            cancel.set()
+            return False
+        try:
+            approving_credential = ad_agent.poll_login(
+                started["request_id"], cancel,
+                say=lambda message: self._send({"say": message}), timeout=120,
+            )
+        except (ad_agent.AgentError, OSError, ValueError) as exc:
+            self._send({"say": "Thessley AD SSH: approval check failed. Refusing."})
+            log(f"AD SSH approval polling failed ({type(exc).__name__})", True)
+            return False
+        if not approving_credential:
+            log(f"AD SSH phone approval denied or expired from {rhost}", True)
+            return False
+
+        if grace > 0:
+            display_user = f"{started['authority']}\\{started['username']}"
+            try:
+                grants.add(started["principal_id"], pass_rhost, grace, approving_credential,
+                           display_user=display_user)
+                scope = "any client IP" if grants.grace_any_ip() else rhost
+                self._send({"say": f"Approved. Your next SSH login from {scope} needs no approval for {grace:g} h."})
+                log(f"AD SSH pass granted to {display_user} (from {scope}, {grace:g} h)")
+            except (OSError, ValueError) as exc:
+                log(f"could not record the AD SSH pass for {display_user}: {exc}", True)
+        log(f"AD SSH phone approval succeeded from {rhost}")
+        return True
+
+    def _web_approve(self, user: str, rhost: str, service: str, cancel: threading.Event) -> bool:
+        """Serve web approvals from the daemon so all phones use its one shared HTTPS listener."""
+        if not peer.client_is_system(self.client_address, self.server.server_address[1]):
+            log(f"web approval refused for {user!r}: caller is not SYSTEM", True)
+            return False
+        if service not in ("web", "web-change", "add-device") or not valid_rhost(rhost):
+            return False
+        self.connection.settimeout(None)
+
+        def watch():
+            try:
+                while self.connection.recv(1):
+                    pass
+            except OSError:
+                pass
+            cancel.set()
+
+        threading.Thread(target=watch, daemon=True).start()
+        return approve.run(user, rhost, service, self._say(cancel), log, cancel=cancel,
+                           use_pass=False, grant_pass=False, wait=web.WEB_WAIT)
+
+    def _web_enroll(self, user: str, cancel: threading.Event) -> bool:
+        """Run admin-web enrollment inside the listener-owning service, on the shared single port."""
+        if not peer.client_is_system(self.client_address, self.server.server_address[1]):
+            log(f"web enrollment refused for {user!r}: caller is not SYSTEM", True)
+            return False
+        return self._run_enrollment(user, cancel)
+
+    def _admin_enroll(self, user: str, cancel: threading.Event) -> bool:
+        """Route the administrator CLI through the same shared listener rather than opening a second port."""
+        caller = peer.client_user(self.client_address, self.server.server_address[1])
+        if (caller is None or not web.is_admin(caller)
+                or not peer.client_is_elevated(self.client_address, self.server.server_address[1])):
+            log(f"administrator enrollment refused for {user!r}: caller was {caller!r}", True)
+            self._send({"say": "Thessley Passkey: administrator rights are required to add a device for another account."})
+            return False
+        return self._run_enrollment(user, cancel)
+
+    def _run_enrollment(self, user: str, cancel: threading.Event) -> bool:
+        """Run enrollment in the listener-owning daemon; parallel enrollments share its port."""
+        try:
+            user = store.normalize_user(user)
+        except ValueError:
+            self._send({"say": "Thessley Passkey: this account name is not supported. Refusing."})
+            return False
+
+        stop_watching = self._watch(cancel)
+        with self.server.enrolling_lock:
+            if user in self.server.enrolling:
+                self._send({"say": "Thessley Passkey: an enrolment for this account is already running. Refusing."})
+                return False
+            self.server.enrolling.add(user)
+        try:
+            # The SYSTEM web process has already enforced the signed-in session, admin scope, and (for
+            # existing accounts) the required step-up approval. Do not ask for that same approval twice.
+            self.connection.settimeout(None)
+
+            def enroll_say(line: str) -> None:
+                self._say(cancel)(line)
+
+            device = enroll.run(user, enroll_say, self._ask_yes(cancel, stop_watching), cancel=cancel,
+                                wait=web.WEB_ENROLL_WAIT, confirm_wait=web.WEB_CONFIRM_WAIT, show_link=True)
+            log(f"web page: {'enrolled ' + repr(device['label']) + ' ' + device['credential_id'] if device else 'enrolment not completed'} "
+                f"for {user}", device is None)
+            return device is not None
+        finally:
+            stop_watching.set()
+            with self.server.enrolling_lock:
+                self.server.enrolling.discard(user)
+
+    def _windows_logon(self, user: str, cancel: threading.Event, sid: str = "", scope: str = "", context: str = "", account: str = "") -> bool:
+        """A one-time phone approval for the Windows unlock tile, called by LogonUI as SYSTEM.
+
+        Do not accept this operation from ordinary local processes, and never consume or create an SSH grace pass.
+        The Windows authentication package still validates the user's password after the phone approves.
+        """
+        caller = peer.client_user(self.client_address, self.server.server_address[1])
+        if not peer.client_is_system(self.client_address, self.server.server_address[1]):
+            self._send({"say": "Thessley Passkey: Windows unlock approval is only available to the lock screen."})
+            log(f"Windows unlock approval refused for {user!r}: caller was {caller!r}", True)
+            return False
+
+        self.connection.settimeout(None)
+
+        def watch():
+            try:
+                while self.connection.recv(1):
+                    pass
+            except OSError:
+                pass
+            cancel.set()
+
+        threading.Thread(target=watch, daemon=True).start()
+
+        # After resume, LogonUI can be ready before Wi-Fi has re-associated or
+        # DHCP has restored the configured adapter's address. Wait here so the
+        # phone approval timer does not start before its QR URL is reachable.
+        # The lock-screen request remains cancellable; normal Windows PIN and
+        # password recovery stays available if the network never returns.
+        deadline = time.monotonic() + LOGON_NETWORK_WAIT
+        next_notice = 0.0
+        phone_ip = None
+        while not cancel.is_set():
+            try:
+                candidate_ip = machine.lan_ip()
+                parsed_ip = ipaddress.ip_address(candidate_ip)
+                if not (parsed_ip.is_loopback or parsed_ip.is_link_local or parsed_ip.is_unspecified):
+                    phone_ip = str(parsed_ip)
+                    break
+                network_error = OSError("the selected phone network is not ready")
+            except (OSError, ValueError) as exc:
+                network_error = exc
+
+            now = time.monotonic()
+            if now >= deadline:
+                self._send({"say": "The phone network is still unavailable. Choose PIN or password, or select Thessley to retry."})
+                log(f"Windows unlock network did not become ready for {user!r}: {network_error!r}", True)
+                return False
+            if now >= next_notice:
+                if not self._send({"say": "Waiting for the phone network after wake. Approval starts when it is ready."}):
+                    cancel.set()
+                    return False
+                next_notice = now + 5
+            cancel.wait(1)
+        if cancel.is_set():
+            return False
+
+        def say(line: str) -> None:
+            if line.startswith("Link: "):
+                link = line[6:]
+                if not self._send({"say": "Scan this QR code with Thessley Passkey to unlock."}):
+                    cancel.set()
+                    return
+                rows = qr.bitmap_rows(link, border=2)
+                if not rows or not self._send({"qr_matrix": "/".join(rows)}):
+                    cancel.set()
+                return
+            if any(char in line for char in "▄▀█"):
+                return  # native UI receives the same QR as a matrix above
+            if not self._send({"say": line}):
+                cancel.set()
+
+        # Windows SIDs are case-insensitive. Canonicalize before deriving the
+        # SID-scoped filename/hash, which is case-sensitive at the byte level.
+        if sid:
+            sid = sid.strip().upper()
+
+        # For local sign-in, Windows' local account database is authoritative.
+        # Resolve the selected local name back to its SID so a stale or
+        # differently-cased SID from LogonUI cannot send an enrolled account
+        # through the ambiguous legacy username-key route. Never infer a SID
+        # this way for domain accounts.
+        if scope == "local" or (not sid and scope != "domain"):
+            try:
+                resolved_sid = drupal_agent._account_sid(user)
+            except drupal_agent.AgentError:
+                resolved_sid = ""
+            if resolved_sid and drupal_agent.configured_sid(resolved_sid):
+                if sid and sid.casefold() != resolved_sid.casefold():
+                    log(f"Windows provider SID did not match the local account SID for {user!r}; using the exact local SID.", True)
+                sid = resolved_sid
+                log(f"Resolved local Windows login for {user!r} to its enrolled SID-bound Drupal key.")
+
+        # "Other user" types a name instead of selecting a Windows account: resolve it first so the
+        # AD service can authorize the exact SID and the provider can serialize the right logon name.
+        if scope == "domain" and not sid and account:
+            account = "\\".join(part.strip() for part in account.split("\\")).strip()
+            try:
+                resolved = ad_agent.resolve_account(account)
+            except ad_agent.AgentError as exc:
+                self._send({"say": "Thessley Passkey: that domain account cannot sign in here. Choose password or retry."})
+                log(f"AD account resolution refused for {account!r}: {exc}", True)
+                return False
+            if not resolved.get("authorized"):
+                self._send({"say": "Thessley Passkey: this account is not authorized on this computer. Choose password."})
+                log(f"AD account not authorized for {account!r}", True)
+                return False
+            sid = resolved["sid"]
+            user = resolved["username"]
+            self._send({"resolved_authority": resolved["authority"],
+                        "resolved_username": resolved["username"]})
+
+        # A paired PC approves AD accounts through the AD service: it authorizes the SID and
+        # creates a one-use, machine-bound request that only that PC can redeem.
+        if scope == "domain" and sid and ad_agent.configured():
+            try:
+                request = ad_agent.start_login(sid, context or "interactive")
+            except ad_agent.AgentError as exc:
+                self._send({"say": "Thessley Passkey: the AD service is unavailable. Choose PIN or password, or retry."})
+                log(f"AD Windows approval refused for {user!r}: {exc}", True)
+                return False
+            if not self._send({"qr_matrix": request["qr_matrix"]}):
+                return False
+            if not self._send({"say": f"Approve {request['authority']}\\{request['username']} with Thessley Passkey."}):
+                return False
+            approved = ad_agent.poll_login(request["request_id"], cancel, say=say)
+            if approved:
+                log(f"AD Windows approval granted for {user!r} by phone key {approved}.")
+                return True
+            log(f"AD Windows approval was not granted for {user!r}.", True)
+            return False
+
+        if sid and drupal_agent.configured_sid(sid):
+            if not context:
+                context = "interactive"
+                log(f"Windows login context was omitted for {user!r}; using interactive sign-in.")
+            try:
+                return drupal_agent.run_login_v2(sid, context, say, cancel, log)
+            except drupal_agent.AgentError as exc:
+                self._send({"say": "Thessley Passkey: the distributed approval service is unavailable. Choose PIN or password, or retry."})
+                log(f"Drupal Windows approval refused for {user!r}: {exc}", True)
+                return False
+
+        if sid and scope == "domain":
+            self._send({"say": "This domain account has no SID-bound Thessley enrollment. Choose PIN or password, or enroll this exact account in Drupal."})
+            log(f"Unenrolled domain principal refused for {user!r}", True)
+            return False
+
+        if sid and scope == "local" and drupal_agent.configured_legacy_local_sid(user, sid):
+            try:
+                return drupal_agent.run_login(user, say, cancel, log)
+            except drupal_agent.AgentError as exc:
+                self._send({"say": "Thessley Passkey: the distributed approval service is unavailable. Choose PIN or password, or retry."})
+                log(f"Legacy Drupal Windows approval refused for {user!r}: {exc}", True)
+                return False
+
+        # Older providers do not supply a SID. Preserve their legacy username-based behavior until the tile is updated.
+        if not sid and drupal_agent.configured(user):
+            try:
+                return drupal_agent.run_login(user, say, cancel, log)
+            except drupal_agent.AgentError as exc:
+                self._send({"say": "Thessley Passkey: the distributed approval service is unavailable. Choose PIN or password, or retry."})
+                log(f"Legacy Drupal Windows approval refused for {user!r}: {exc}", True)
+                return False
+
+        return approve.run(
+            user, grants.LOCAL, "windows-logon", say, log, cancel=cancel,
+            ip=phone_ip, use_pass=False, grant_pass=False, request_type="login",
+        )
+
+    def _windows_logon_test(self, user: str, cancel: threading.Event) -> bool:
+        """Desktop-only prototype request. Restrict it to the connecting user's own account."""
+        caller = peer.client_user(self.client_address, self.server.server_address[1])
+        try:
+            same_user = caller is not None and store.normalize_user(caller) == store.normalize_user(user)
+        except ValueError:
+            same_user = False
+        if not same_user:
+            self._send({"say": "Thessley test: request refused because the app must run as the account being tested."})
+            log(f"Windows sign-in test refused for {user!r}: caller was {caller!r}", True)
+            return False
+
+        self.connection.settimeout(None)
+
+        def watch():
+            try:
+                while self.connection.recv(1):
+                    pass
+            except OSError:
+                pass
+            cancel.set()
+
+        threading.Thread(target=watch, daemon=True).start()
+
+        def say(line: str) -> None:
+            if line.startswith("Link: "):
+                if not self._send({"say": "Scan this QR code with Thessley Passkey."}):
+                    cancel.set()
+                    return
+                rows = qr.bitmap_rows(line[6:], border=2)
+                if not rows or not self._send({"qr_matrix": "/".join(rows)}):
+                    cancel.set()
+                return
+            if any(char in line for char in "▄▀█"):
+                return
+            if not self._send({"say": line}):
+                cancel.set()
+
+        return approve.run(
+            user, grants.LOCAL, "windows-logon", say, log, cancel=cancel,
+            use_pass=False, grant_pass=False, request_type="login",
+        )
 
     # -- a user adding an approver for their own account ---------------------------------------------------------------
 
@@ -185,7 +627,14 @@ class Handler(socketserver.StreamRequestHandler):
             if not self._allowed_to_enroll(user, say, cancel):
                 return False
             self.connection.settimeout(None)
-            device = enroll.run(user, say, self._ask_yes(cancel, stop_watching), cancel=cancel)
+            def enroll_say(line: str) -> None:
+                if line.startswith("Link: "):
+                    rows = qr.bitmap_rows(line[6:], border=2)
+                    if rows:
+                        self._send({"qr_matrix": "/".join(rows)})
+                say(line)
+
+            device = enroll.run(user, enroll_say, self._ask_yes(cancel, stop_watching), cancel=cancel, show_link=True)
             log(f"{'enrolled ' + repr(device['label']) + ' ' + device['credential_id'] if device else 'enrolment not completed'} "
                 f"for {user} (by themselves)", device is None)
             return device is not None
@@ -227,21 +676,59 @@ class Server(socketserver.ThreadingTCPServer):
 
 def main() -> int:
     store.ensure_dirs()
-    grants.clear_all()  # a restart ends every pass
-    ip = machine.lan_ip()
+    if not grants.web_settings()["preserve_passes_on_restart"]:
+        grants.clear_all()
     cert_dir = os.path.join(store.BASE, "approvals")
     cert_path, key_path = os.path.join(cert_dir, "cert.pem"), os.path.join(cert_dir, "key.pem")
-    fingerprint = web.ensure_cert(cert_path, key_path, [ip])
-    shared = SharedListener(ip, cert_path, key_path, fingerprint)
-    shared.start()
-    approve.set_shared_listener(shared)
+    shared = None
+    last_network_log = 0.0
+    listener_enabled = True
+    try:
+        with open(os.path.join(store.BASE, "config.json"), encoding="utf-8") as handle:
+            cfg = json.load(handle)
+        if isinstance(cfg, dict) and cfg.get("listener_enabled") is False:
+            listener_enabled = False
+    except (OSError, ValueError):
+        pass
+    if listener_enabled:
+      while shared is None:
+        try:
+            ip = machine.lan_ip()
+            parsed_ip = ipaddress.ip_address(ip)
+            if parsed_ip.is_loopback or parsed_ip.is_link_local or parsed_ip.is_unspecified:
+                raise OSError("no usable LAN address yet")
+            fingerprint = web.ensure_cert(cert_path, key_path, [ip])
+            candidate = SharedListener(ip, cert_path, key_path, fingerprint)
+            candidate.start()
+            shared = candidate
+        except (OSError, ValueError) as e:
+            now = time.monotonic()
+            if now - last_network_log >= 30:
+                log(f"waiting for a usable network address before starting the approval listener: {e}", True)
+                last_network_log = now
+            time.sleep(1)
+      approve.set_shared_listener(shared)
+    else:
+        log("approval listener disabled by config.json; the AD SSH gate uses the AD service")
     server = Server()
-    log(f"service started on {HOST}:{server.server_address[1]} and HTTPS approval listener {ip}:47810")
+    if shared is not None:
+        log(f"service started on {HOST}:{server.server_address[1]} and HTTPS approval listener {ip}:47810")
+    else:
+        log(f"service started on {HOST}:{server.server_address[1]} without a local approval listener")
+    drupal_sync_stop = threading.Event()
+    threading.Thread(
+        target=drupal_agent.sync_loop,
+        args=(drupal_sync_stop, log),
+        name="ThessleyDrupalPolicySync",
+        daemon=True,
+    ).start()
     try:
         server.serve_forever()
     finally:
+        drupal_sync_stop.set()
         server.server_close()
-        shared.close()
+        if shared is not None:
+            shared.close()
     return 0
 
 

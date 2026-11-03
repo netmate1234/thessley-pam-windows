@@ -1,0 +1,7 @@
+# Reviewed dependency versions for the Windows service installer (Python 3.12+).
+# Keep this in sync with pyproject.toml and verify the imports after installing.
+asn1crypto==1.5.1
+cffi==2.1.1
+cryptography==50.0.2
+pycparser==3.11
+qrcode==8.2
