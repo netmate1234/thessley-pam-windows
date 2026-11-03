@@ -88,6 +88,10 @@
       width:1280px;height:720px}
     #nav,#dots,#count{display:none}
   }
+
+  .clean #nav,.clean #dots,.clean #count{display:none}
+  .clean .deck{transform:none!important}
+  .clean .slide{border-radius:0;border:0}
 </style>
 </head>
 <body>
@@ -202,6 +206,7 @@
   });
 
   window.addEventListener('resize', fit);
+  if (location.search.indexOf('clean') >= 0) { document.body.classList.add('clean'); }
   fit();
   var start = parseInt((location.hash || '').replace('#', ''), 10);
   show(isFinite(start) && start > 0 ? start - 1 : 0);
