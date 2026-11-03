@@ -388,6 +388,11 @@ def cmd_web(args) -> int:
         print(f"This enrolls only the first phone for {username}; it cannot open settings or other accounts.")
         return 0
     if action in ("on", "off"):
+        if (action == "on" and grants.web_settings()["port"] == 47820
+                and _task("/Query", "/TN", "ThessleyADApi").returncode == 0):
+            sys.exit("The Thessley AD service is installed on this computer and owns TCP 47820 "
+                     "(its /admin/ page). Leave the PAM web page off, or give it another port first: "
+                     "thessley-pam-win web port NUMBER.")
         grants.set_web(enabled=(action == "on"))
         if action == "on":
             _task("/Change", "/TN", WEB_TASK, "/ENABLE")

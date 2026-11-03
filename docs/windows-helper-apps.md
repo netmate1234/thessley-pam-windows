@@ -34,6 +34,8 @@ powershell -ExecutionPolicy Bypass -File .\install\install.ps1 `
 
 The firewall options allow the shared phone approval and enrollment service (TCP 47810) and the web page (TCP 47820) from `LocalSubnet` on all Windows network profiles by default. The remote source stays restricted to the local subnet, rather than all internet addresses. Pass `-FirewallProfile Private` to restrict the rules to Private profiles. Web and command-line enrollment register concurrent request paths on the service-owned listener; enrollment does not require or open additional ports. The installer does not edit `sshd_config` or restart OpenSSH.
 
+On a **domain controller**, do not add `-OpenWebFirewall` and leave this PAM web page off: TCP 47820 belongs to the Thessley AD service's `/admin/` site. Phone approvals (47810) and AD enrollment (47811) are separate and keep working.
+
 ### Install over an existing SSH connection
 
 Install Windows OpenSSH Server and verify an ordinary SSH login before installing Thessley. From a trusted computer, open

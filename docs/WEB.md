@@ -4,6 +4,13 @@ Sign in with your account name and an approval (the Thessley Passkey phone app o
 approvers in a browser. It is the Windows counterpart of the page in thessley-pam-linux (`docs/WEB.md` there) and works the
 same way. There are no passwords.
 
+> **On a domain controller, leave this page off.** The Thessley AD service
+> already owns TCP 47820 for its `https://HOST:47820/admin/` site, and keeps
+> phone approvals on 47810 and enrollment on 47811. Enabling this separate
+> page on the same port stops the AD service from starting its login API.
+> The guided installer and `thessley-pam-win web on` now refuse that
+> combination.
+
 ## What to do on the Windows computer
 
 The **Admin > Setup rollback** card lists pending SSH setup and Windows sign-in recovery timers separately. Guided setup

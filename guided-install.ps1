@@ -189,6 +189,17 @@ if ($cloudAccess) {
         $openWebFirewall = Ask-YesNo 'Allow the local subnet to reach the web page on TCP 47820?' $true
     }
 }
+# On a domain controller the Thessley AD service already owns TCP 47820 for
+# its /admin/ page. Enabling this separate web page would take the port and
+# stop the AD service from binding its login API too.
+if (Get-ScheduledTask -TaskName 'ThessleyADApi' -ErrorAction SilentlyContinue) {
+    if ($enableWeb) {
+        Write-Host 'The Thessley AD service is installed on this computer and owns TCP 47820 (its /admin/ page).'
+        Write-Host 'The PAM web page will stay off so the two do not fight over the port.'
+    }
+    $enableWeb = $false
+    $openWebFirewall = $false
+}
 $vpnClientSubnets = ''
 $sshVpnFirewall = $sshInstalled -and $sshdService -and $sshdService.Status -eq 'Running'
 if (-not $cloudAccess -and ($openApprovalFirewall -or $openWebFirewall -or $sshVpnFirewall)) {

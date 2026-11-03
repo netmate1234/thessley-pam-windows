@@ -225,6 +225,15 @@ raise SystemExit(main())
         }
     }
     if ($serviceExisted) { Export-ScheduledTask -TaskName $task | Set-Content -LiteralPath (Join-Path $upgradeBackup 'service.xml') -Encoding Unicode }
+    # On a domain controller the Thessley AD service owns TCP 47820 for its
+    # /admin/ page. Do not restore a previously enabled PAM web task there:
+    # it would take the port and the AD login API would not bind.
+    if (Get-ScheduledTask -TaskName 'ThessleyADApi' -ErrorAction SilentlyContinue) {
+        if ($webWasEnabled) {
+            Write-Host 'Thessley AD service found: leaving the PAM web page off (TCP 47820 is its /admin/ site).'
+        }
+        $webWasEnabled = $false
+    }
     if ($webExisted) { Export-ScheduledTask -TaskName $webTask | Set-Content -LiteralPath (Join-Path $upgradeBackup 'web.xml') -Encoding Unicode }
     $gateLauncher = Join-Path $base 'gate.cmd'
     $adSshGateLauncher = Join-Path $base 'ad-ssh-gate.cmd'
