@@ -2,11 +2,27 @@
 
 ![License](https://img.shields.io/badge/license-GPL--2.0--or--later-7c6cf0?style=flat-square) ![Windows](https://img.shields.io/badge/Windows-11-0078d4?style=flat-square) ![Python](https://img.shields.io/badge/Python-3.10%2B-3776ab?style=flat-square) ![Deck](https://img.shields.io/badge/deck-7c6cf0?style=flat-square)
 
-[](https://netmate1234.github.io/thessley-pam-windows/)
+[![banner](docs/preview/hero.png)](https://netmate1234.github.io/thessley-pam-windows/)
 
 Approve Windows SSH logins with the same phone and the same protocol as the Linux gate.
 
 **Presentation:** [interactive deck](https://netmate1234.github.io/thessley-pam-windows/)
+
+## Quick install
+
+Run in an elevated PowerShell:
+
+```powershell
+git clone https://github.com/netmate1234/thessley-pam-windows.git
+cd thessley-pam-windows
+py -3 -m pip install cryptography qrcode
+powershell -ExecutionPolicy Bypass -File install\install.ps1
+thessley-pam-win status
+```
+
+**Verify:** `thessley-pam-win enroll` shows a QR; `thessley-pam-win status` reports the service running.
+
+Requirements: Windows 11 with OpenSSH Server, Python 3.10+ installed for all users.
 
 - Windows OpenSSH has no PAM, so the approval runs as a `ForceCommand` right after the password.
 - A small service running as SYSTEM keeps approvers and passes where a logged-in user cannot change them.
