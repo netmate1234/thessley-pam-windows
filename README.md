@@ -11,14 +11,6 @@ Approve Windows SSH logins with the same phone and the same protocol as the Linu
 
 ![Password first, then the phone](docs/preview/slide-2.png)
 
-[![thessley-pam-windows — deck](docs/preview/slide-1.png)](https://netmate1234.github.io/thessley-presentations/pam-windows/)
-
-**Interactive deck:** [netmate1234.github.io/thessley-presentations/pam-windows](https://netmate1234.github.io/thessley-presentations/pam-windows/) — arrow keys or click the edges.
-
-| How it works | Trust model |
-|:---:|:---:|
-| [![How it works](docs/preview/slide-2.png)](https://netmate1234.github.io/thessley-presentations/pam-windows/#2) | [![Next](docs/preview/slide-1.png)](https://netmate1234.github.io/thessley-presentations/pam-windows/#1) |
-
 Approve ssh logins to a **Windows 11** computer with the Thessley Passkey phone app or desktop app: the account's password
 first, then a QR code and a `thessleypam://` link that a phone (or the desktop app) approves with a signature.
 
