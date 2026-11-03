@@ -1,5 +1,9 @@
 # thessley-pam-windows
 
+![License](https://img.shields.io/badge/license-GPL--2.0--or--later-7c6cf0?style=flat-square) ![Windows](https://img.shields.io/badge/Windows-11-0078d4?style=flat-square) ![Python](https://img.shields.io/badge/Python-3.10%2B-3776ab?style=flat-square) ![Deck](https://img.shields.io/badge/deck-slides-7c6cf0?style=flat-square)
+
+[![thessley-pam-windows](docs/preview/slide-1.png)](https://netmate1234.github.io/thessley-pam-windows/)
+
 Approve Windows SSH logins with the same phone and the same protocol as the Linux gate.
 
 **Presentation:** [slides on GitHub Pages](https://netmate1234.github.io/thessley-pam-windows/)
