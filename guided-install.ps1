@@ -427,6 +427,16 @@ if ($providerConfigured) {
     }
 }
 
+# RDP: land on the Thessley tile (no NLA password prompt) and keep it administrator-only.
+if ($providerConfigured) {
+    $rdpStep = Join-Path $repo 'install\configure-rdp-tile.ps1'
+    if (Test-Path -LiteralPath $rdpStep) {
+        if ($Unattended -or (Ask-YesNo 'Make Remote Desktop use the Thessley tile and allow only administrators to connect?' $false)) {
+            & $rdpStep -RollbackMinutes 20
+        }
+    }
+}
+
 # A PC paired with the AD service gates domain-account SSH with the central phone key,
 # except for the local Administrator, which stays as break-glass.
 if ($adPaired -and $sshReady) {
