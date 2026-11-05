@@ -22,6 +22,8 @@ thessley-pam-win status
 
 **Verify:** `thessley-pam-win enroll` shows a QR; `thessley-pam-win status` reports the service running.
 
+**Access safety:** the base installer does not edit `sshd_config` or Windows sign-in policy. Before enabling SSH gates, keep an existing session and a separate console/local recovery route open; read [SSH setup and recovery](docs/SSH.md) and use its rollback procedure. Do not gate the only administrator or recovery account.
+
 Requirements: Windows 11 with OpenSSH Server, Python 3.10+ installed for all users.
 
 - Windows OpenSSH has no PAM, so the approval runs as a `ForceCommand` right after the password.
