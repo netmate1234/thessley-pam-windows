@@ -105,7 +105,7 @@ def main() -> None:
         "complete QR setup at the Windows sign-in screen and confirm only after a real sign-in succeeds. No ADB\n"
         "or USB debugging is required.\n\n"
         "The packages are unsigned. Windows may show a security prompt when opening them.\n"
-        "Rebuild with: python3 thessley-pam-windows-update/scripts/build_downloads.py\n",
+        "Rebuild with: python3 scripts/build_downloads.py\n",
         encoding="utf-8",
     )
     sums = []
